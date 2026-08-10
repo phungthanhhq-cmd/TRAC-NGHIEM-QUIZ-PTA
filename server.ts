@@ -4,7 +4,8 @@ import cors from 'cors';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 
-const DEFAULT_MODEL = "gemini-2.5-flash";
+const DEFAULT_MODEL = "gemini-3.6-flash";
+const CANDIDATE_MODELS = ["gemini-3.6-flash", "gemini-flash-latest"];
 
 // In-memory quiz store (maps short 6-character code to quiz package)
 interface QuizStoreItem {
@@ -107,44 +108,51 @@ async function startServer() {
       let responseText: string | undefined;
       let lastError: any = null;
 
-      try {
-        const response = await ai.models.generateContent({
-          model: DEFAULT_MODEL,
-          contents: {
-            parts: [...(fileParts || []), { text: promptText }]
-          },
-          config: {
-            systemInstruction: SYSTEM_INSTRUCTION,
-            responseMimeType: "application/json",
-            responseSchema: dynamicQuizSchema,
-            temperature: 0.4,
-          }
-        });
-        responseText = response.text;
-      } catch (err: any) {
-        const errStr = String(err?.message || err);
-        if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('500') || errStr.includes('503')) {
-          console.warn("[Server Proxy] Rate limit/error encountered. Single retry in 2000ms...");
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          try {
-            const retryRes = await ai.models.generateContent({
-              model: DEFAULT_MODEL,
-              contents: {
-                parts: [...(fileParts || []), { text: promptText }]
-              },
-              config: {
-                systemInstruction: SYSTEM_INSTRUCTION,
-                responseMimeType: "application/json",
-                responseSchema: dynamicQuizSchema,
-                temperature: 0.4,
-              }
-            });
-            responseText = retryRes.text;
-          } catch (retryErr) {
-            lastError = retryErr;
-          }
-        } else {
+      for (const targetModel of CANDIDATE_MODELS) {
+        try {
+          const response = await ai.models.generateContent({
+            model: targetModel,
+            contents: {
+              parts: [...(fileParts || []), { text: promptText }]
+            },
+            config: {
+              systemInstruction: SYSTEM_INSTRUCTION,
+              responseMimeType: "application/json",
+              responseSchema: dynamicQuizSchema,
+              temperature: 0.4,
+            }
+          });
+          responseText = response.text;
+          if (responseText) break;
+        } catch (err: any) {
           lastError = err;
+          const errStr = String(err?.message || err);
+          if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('500') || errStr.includes('503')) {
+            console.warn("[Server Proxy] Rate limit/error encountered. Single retry in 2000ms...");
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            try {
+              const retryRes = await ai.models.generateContent({
+                model: targetModel,
+                contents: {
+                  parts: [...(fileParts || []), { text: promptText }]
+                },
+                config: {
+                  systemInstruction: SYSTEM_INSTRUCTION,
+                  responseMimeType: "application/json",
+                  responseSchema: dynamicQuizSchema,
+                  temperature: 0.4,
+                }
+              });
+              responseText = retryRes.text;
+              if (responseText) break;
+            } catch (retryErr) {
+              lastError = retryErr;
+            }
+          } else if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
+            continue;
+          } else {
+            break;
+          }
         }
       }
 
@@ -291,23 +299,33 @@ async function startServer() {
         }
       });
 
-      const response = await ai.models.generateContent({
-        model: DEFAULT_MODEL,
-        contents: "Xin chào, hãy phản hồi ngắn gọn 'OK'.",
-        config: { temperature: 0.1 }
-      });
+      let lastError: any = null;
+      for (const targetModel of CANDIDATE_MODELS) {
+        try {
+          const response = await ai.models.generateContent({
+            model: targetModel,
+            contents: "Xin chào, hãy phản hồi ngắn gọn 'OK'.",
+            config: { temperature: 0.1 }
+          });
 
-      if (response && response.text) {
-        return res.json({
-          success: true,
-          message: "🟢 Gemini API: Đã kết nối thành công!",
-          model: "Gemini 2.5 Flash"
-        });
-      } else {
-        throw new Error("Phản hồi không chứa nội dung.");
+          if (response && response.text) {
+            return res.json({
+              success: true,
+              message: "🟢 Gemini API: Đã kết nối thành công!",
+              model: targetModel === "gemini-3.6-flash" ? "Gemini 3.6 Flash" : targetModel
+            });
+          }
+        } catch (err: any) {
+          lastError = err;
+          const errStr = String(err?.message || err);
+          if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
+            continue;
+          }
+          break;
+        }
       }
-    } catch (err: any) {
-      const errStr = String(err?.message || err);
+
+      const errStr = String(lastError?.message || lastError || '');
 
       if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED')) {
         return res.status(429).json({
@@ -319,7 +337,7 @@ async function startServer() {
       if (errStr.includes('401') || errStr.includes('403') || errStr.includes('PERMISSION_DENIED') || errStr.includes('denied access')) {
         return res.status(403).json({
           success: false,
-          message: "🔐 API Key không có quyền sử dụng Gemini API hoặc đã bị vô hiệu hóa.\n\nChi tiết lỗi từ Google: " + errStr + "\n\nNguyên nhân phổ biến:\n1. API Key chưa được tạo đúng tại Google AI Studio (aistudio.google.com).\n2. Tài khoản/Project chưa bật Generative Language API.\n3. API Key bị cài đặt giới hạn (Application/HTTP referrer restrictions) chặn truy cập."
+          message: "🔐 API Key không có quyền sử dụng Gemini API hoặc Dự án bị từ chối truy cập (Permission Denied).\n\nChi tiết lỗi từ Google: " + errStr + "\n\nNguyên nhân & Cách khắc phục nhanh:\n1. 🌐 API Key bị cài rào cản tên miền (HTTP Referrer): Hãy vào console.cloud.google.com/apis/credentials -> Bấm vào API Key -> Mục 'Application restrictions' chọn 'None' (hoặc thêm domain Vercel của bạn).\n2. 🔑 Mã API Key được tạo từ Google Cloud thay vì AI Studio: Hãy vào aistudio.google.com/app/apikey -> Bấm 'Create API key in new project' để tạo mã mới hoàn toàn miễn phí.\n3. ⚠️ Dự án Google Cloud cũ bị khóa/giới hạn: Tạo 1 API key mới trong dự án mới tại Google AI Studio."
         });
       }
 
@@ -333,13 +351,18 @@ async function startServer() {
       if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
         return res.status(404).json({
           success: false,
-          message: "⚠️ Model Gemini 2.5 Flash hiện tại không khả dụng trên API Key này.\n\nChi tiết lỗi từ Google: " + errStr
+          message: "⚠️ Model Gemini hiện tại không khả dụng trên API Key này.\n\nChi tiết lỗi từ Google: " + errStr
         });
       }
 
       return res.status(500).json({
         success: false,
         message: `⚠️ Lỗi kết nối Gemini API: ${errStr}`
+      });
+    } catch (outerErr: any) {
+      return res.status(500).json({
+        success: false,
+        message: `⚠️ Lỗi hệ thống khi kiểm tra API Key: ${outerErr?.message || outerErr}`
       });
     }
   });

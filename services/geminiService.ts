@@ -2,7 +2,8 @@ import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { QuizConfig, QuizQuestion } from "../types";
 import { extractTextFromDocx } from "../utils/fileProcessor";
 
-export const DEFAULT_MODEL = "gemini-2.5-flash";
+export const DEFAULT_MODEL = "gemini-3.6-flash";
+export const CANDIDATE_MODELS = ["gemini-3.6-flash", "gemini-flash-latest"];
 
 const SYSTEM_INSTRUCTION = `
 Bạn là một giáo viên chuyên gia của Việt Nam, am hiểu sâu sắc Chương trình Giáo dục Phổ thông 2018 (GDPT 2018).
@@ -72,69 +73,78 @@ export const testGeminiConnection = async (apiKey: string): Promise<{ success: b
   }
 
   // 2. Direct client fallback using GoogleGenAI SDK
-  try {
-    const ai = new GoogleGenAI({ 
-      apiKey: trimmed,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build-byok',
+  let lastErr: any = null;
+  for (const targetModel of CANDIDATE_MODELS) {
+    try {
+      const ai = new GoogleGenAI({ 
+        apiKey: trimmed,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build-byok',
+          }
         }
+      });
+
+      const response = await ai.models.generateContent({
+        model: targetModel,
+        contents: "Xin chào, phản hồi ngắn gọn 'OK'.",
+        config: {
+          temperature: 0.1,
+        }
+      });
+
+      if (response && response.text) {
+        return {
+          success: true,
+          message: "🟢 Gemini API: Đã kết nối thành công!",
+          model: targetModel === "gemini-3.6-flash" ? "Gemini 3.6 Flash" : targetModel
+        };
       }
-    });
-
-    const response = await ai.models.generateContent({
-      model: DEFAULT_MODEL,
-      contents: "Xin chào, phản hồi ngắn gọn 'OK'.",
-      config: {
-        temperature: 0.1,
+    } catch (err: any) {
+      lastErr = err;
+      const errStr = String(err?.message || err);
+      // If 404 or NOT_FOUND, try next candidate model
+      if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
+        continue;
       }
-    });
-
-    if (response && response.text) {
-      return {
-        success: true,
-        message: "🟢 Gemini API: Đã kết nối thành công!",
-        model: "Gemini 2.5 Flash"
-      };
-    } else {
-      throw new Error("Phản hồi không chứa văn bản.");
+      break;
     }
-  } catch (err: any) {
-    const errStr = String(err?.message || err);
+  }
 
-    if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED')) {
-      return {
-        success: false,
-        message: "⚠️ API Key của bạn đang đạt giới hạn sử dụng tạm thời.\n\nVui lòng:\n• Chờ một lúc rồi thử lại;\n• Kiểm tra hạn mức Gemini API;\n• Hoặc sử dụng API Key khác.\n\nChi tiết lỗi từ Google: " + errStr
-      };
-    }
+  const errStr = String(lastErr?.message || lastErr || '');
 
-    if (errStr.includes('401') || errStr.includes('403') || errStr.includes('PERMISSION_DENIED') || errStr.includes('denied access')) {
-      return {
-        success: false,
-        message: "🔐 API Key không có quyền sử dụng Gemini API hoặc đã bị vô hiệu hóa.\n\nChi tiết lỗi từ Google: " + errStr + "\n\nNguyên nhân phổ biến:\n1. Mã API Key chưa được tạo đúng tại Google AI Studio (aistudio.google.com/app/apikey).\n2. Dự án chưa bật Generative Language API.\n3. Mã API Key bị cài đặt rào cản domain/HTTP Referrer chặn truy cập."
-      };
-    }
-
-    if (errStr.includes('400') || errStr.includes('API_KEY_INVALID') || errStr.includes('API key not valid')) {
-      return {
-        success: false,
-        message: "⚠️ API Key hoặc yêu cầu gửi đến Gemini chưa hợp lệ. Vui lòng kiểm tra lại API Key và cấu hình model.\n\nChi tiết lỗi từ Google: " + errStr
-      };
-    }
-
-    if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
-      return {
-        success: false,
-        message: "⚠️ Model Gemini 2.5 Flash hiện tại không khả dụng trên API Key này.\n\nChi tiết lỗi từ Google: " + errStr
-      };
-    }
-
+  if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED')) {
     return {
       success: false,
-      message: `⚠️ Lỗi kết nối Gemini API: ${errStr}`
+      message: "⚠️ API Key của bạn đang đạt giới hạn sử dụng tạm thời.\n\nVui lòng:\n• Chờ một lúc rồi thử lại;\n• Kiểm tra hạn mức Gemini API;\n• Hoặc sử dụng API Key khác.\n\nChi tiết lỗi từ Google: " + errStr
     };
   }
+
+  if (errStr.includes('401') || errStr.includes('403') || errStr.includes('PERMISSION_DENIED') || errStr.includes('denied access')) {
+    return {
+      success: false,
+      message: "🔐 API Key không có quyền sử dụng Gemini API hoặc Dự án bị từ chối truy cập (Permission Denied).\n\nChi tiết lỗi từ Google: " + errStr + "\n\nNguyên nhân & Cách khắc phục nhanh:\n1. 🌐 API Key bị cài rào cản tên miền (HTTP Referrer): Hãy vào console.cloud.google.com/apis/credentials -> Bấm vào API Key -> Mục 'Application restrictions' chọn 'None' (hoặc thêm domain Vercel của bạn).\n2. 🔑 Mã API Key được tạo từ Google Cloud thay vì AI Studio: Hãy vào aistudio.google.com/app/apikey -> Bấm 'Create API key in new project' để tạo mã mới hoàn toàn miễn phí.\n3. ⚠️ Dự án Google Cloud cũ bị khóa/giới hạn: Tạo 1 API key mới trong dự án mới tại Google AI Studio."
+    };
+  }
+
+  if (errStr.includes('400') || errStr.includes('API_KEY_INVALID') || errStr.includes('API key not valid')) {
+    return {
+      success: false,
+      message: "⚠️ API Key hoặc yêu cầu gửi đến Gemini chưa hợp lệ. Vui lòng kiểm tra lại API Key và cấu hình model.\n\nChi tiết lỗi từ Google: " + errStr
+    };
+  }
+
+  if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
+    return {
+      success: false,
+      message: "⚠️ Model Gemini hiện tại không khả dụng trên API Key này.\n\nChi tiết lỗi từ Google: " + errStr
+    };
+  }
+
+  return {
+    success: false,
+    message: `⚠️ Lỗi kết nối Gemini API: ${errStr}`
+  };
 };
 
 /**
@@ -322,49 +332,57 @@ export const generateQuizFromContent = async (
     }
   };
 
-  // Call DEFAULT_MODEL with max 1 single retry for transient rate limits
+  // Call CANDIDATE_MODELS with fallback and retry for rate limits
   let responseText: string | undefined;
   let lastClientError: any = null;
 
-  try {
-    const response = await ai.models.generateContent({
-      model: DEFAULT_MODEL,
-      contents: {
-        parts: [...fileParts, { text: promptText }]
-      },
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        responseMimeType: "application/json",
-        responseSchema: dynamicQuizSchema,
-        temperature: 0.4,
-      }
-    });
-    responseText = response.text;
-  } catch (err: any) {
-    const errStr = String(err?.message || err);
-    // Single retry with 2000ms delay if rate limited / transient error
-    if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('500') || errStr.includes('503')) {
-      console.warn("Client hit rate limit/error. Single retry in 2000ms...");
-      await new Promise(res => setTimeout(res, 2000));
-      try {
-        const responseRetry = await ai.models.generateContent({
-          model: DEFAULT_MODEL,
-          contents: {
-            parts: [...fileParts, { text: promptText }]
-          },
-          config: {
-            systemInstruction: SYSTEM_INSTRUCTION,
-            responseMimeType: "application/json",
-            responseSchema: dynamicQuizSchema,
-            temperature: 0.4,
-          }
-        });
-        responseText = responseRetry.text;
-      } catch (retryErr: any) {
-        lastClientError = retryErr;
-      }
-    } else {
+  for (const targetModel of CANDIDATE_MODELS) {
+    try {
+      const response = await ai.models.generateContent({
+        model: targetModel,
+        contents: {
+          parts: [...fileParts, { text: promptText }]
+        },
+        config: {
+          systemInstruction: SYSTEM_INSTRUCTION,
+          responseMimeType: "application/json",
+          responseSchema: dynamicQuizSchema,
+          temperature: 0.4,
+        }
+      });
+      responseText = response.text;
+      if (responseText) break;
+    } catch (err: any) {
       lastClientError = err;
+      const errStr = String(err?.message || err);
+      // Single retry with 2000ms delay if rate limited / transient error
+      if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('500') || errStr.includes('503')) {
+        console.warn("Client hit rate limit/error. Single retry in 2000ms...");
+        await new Promise(res => setTimeout(res, 2000));
+        try {
+          const responseRetry = await ai.models.generateContent({
+            model: targetModel,
+            contents: {
+              parts: [...fileParts, { text: promptText }]
+            },
+            config: {
+              systemInstruction: SYSTEM_INSTRUCTION,
+              responseMimeType: "application/json",
+              responseSchema: dynamicQuizSchema,
+              temperature: 0.4,
+            }
+          });
+          responseText = responseRetry.text;
+          if (responseText) break;
+        } catch (retryErr: any) {
+          lastClientError = retryErr;
+        }
+      } else if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
+        // Try next candidate model
+        continue;
+      } else {
+        break;
+      }
     }
   }
 

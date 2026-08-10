@@ -197,7 +197,7 @@ const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onClose, onKeySaved }
                 </div>
                 <div className="text-xs text-slate-600">
                   <span className="font-medium text-slate-500">Model mặc định: </span>
-                  <strong className="text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-mono">Gemini 2.5 Flash</strong>
+                  <strong className="text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-mono">Gemini 3.6 Flash</strong>
                 </div>
               </div>
 
@@ -326,7 +326,7 @@ const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onClose, onKeySaved }
         {isTesting && (
           <div className="p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs font-medium flex items-center gap-2">
             <RefreshCw className="w-4 h-4 text-amber-600 animate-spin" />
-            <span>🟡 Đang kiểm tra kết nối với Gemini API (Model: Gemini 2.5 Flash)...</span>
+            <span>🟡 Đang kiểm tra kết nối với Gemini API (Model: Gemini 3.6 Flash)...</span>
           </div>
         )}
 
