@@ -17,7 +17,8 @@ import {
   Maximize2,
   Minimize2,
   Smartphone,
-  MessageSquare
+  MessageSquare,
+  AlertCircle
 } from 'lucide-react';
 
 interface ShareModalProps {
@@ -30,6 +31,52 @@ interface ShareModalProps {
   onOpenStudentView: () => void;
 }
 
+// Safe QR Code renderer that guards against "Data too long" error
+interface SafeQRProps {
+  id?: string;
+  value: string;
+  size: number;
+  level?: 'L' | 'M' | 'Q' | 'H';
+}
+
+const SafeQRCode: React.FC<SafeQRProps> = ({ id, value, size, level = 'M' }) => {
+  // Max safe length for QR code is ~1000-1200 characters to prevent overflow
+  if (!value || value.length > 1200) {
+    return (
+      <div 
+        style={{ width: size, height: size }} 
+        className="flex flex-col items-center justify-center bg-slate-50 border border-slate-200 rounded-xl text-center p-3"
+      >
+        <RefreshCw className="w-6 h-6 text-emerald-600 animate-spin mb-2" />
+        <span className="text-[11px] font-medium text-slate-500">Đang tạo mã QR...</span>
+      </div>
+    );
+  }
+
+  try {
+    return (
+      <QRCodeSVG
+        id={id}
+        value={value}
+        size={size}
+        level={level}
+        includeMargin={true}
+      />
+    );
+  } catch (err) {
+    console.error("QR Code generation error:", err);
+    return (
+      <div 
+        style={{ width: size, height: size }} 
+        className="flex flex-col items-center justify-center bg-rose-50 border border-rose-200 rounded-xl text-center p-3 text-rose-600"
+      >
+        <AlertCircle className="w-6 h-6 mb-1" />
+        <span className="text-[11px] font-medium">Không thể tạo QR cho liên kết này</span>
+      </div>
+    );
+  }
+};
+
 const ShareModal: React.FC<ShareModalProps> = ({
   isOpen,
   onClose,
@@ -40,12 +87,10 @@ const ShareModal: React.FC<ShareModalProps> = ({
   onOpenStudentView
 }) => {
   const [copiedTiny, setCopiedTiny] = useState(false);
-  const [copiedFull, setCopiedFull] = useState(false);
   const [fullShareUrl, setFullShareUrl] = useState<string>('');
   const [shortenedUrl, setShortenedUrl] = useState<string>('');
   const [isShortening, setIsShortening] = useState<boolean>(false);
   const [isFullScreenQR, setIsFullScreenQR] = useState<boolean>(false);
-  const [copiedQrToast, setCopiedQrToast] = useState(false);
 
   const quizTitle = lessonName?.trim()
     ? `${subject || 'Môn học'} Lớp ${grade || ''}: ${lessonName.trim()}`
@@ -67,35 +112,55 @@ const ShareModal: React.FC<ShareModalProps> = ({
       );
       setFullShareUrl(generatedFullUrl);
 
-      // Automatically generate short URL
+      // Start shortening
       setIsShortening(true);
       setShortenedUrl('');
-      shortenUrl(generatedFullUrl).then((short) => {
-        if (short) {
-          setShortenedUrl(short);
+
+      // 1. Create immediate server short link if possible as instant fallback
+      fetch('/api/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: quizTitle,
+          questions,
+          subject,
+          grade
+        })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.url) {
+          // Temporarily set server short URL so QR code can render immediately!
+          setShortenedUrl(data.url);
         }
-        setIsShortening(false);
-      }).catch(() => {
-        setIsShortening(false);
+      })
+      .catch(() => {})
+      .finally(() => {
+        // 2. Also fetch permanent TinyURL / is.gd
+        shortenUrl(generatedFullUrl).then((short) => {
+          if (short) {
+            setShortenedUrl(short);
+          }
+          setIsShortening(false);
+        }).catch(() => {
+          setIsShortening(false);
+        });
       });
     }
   }, [isOpen, quizTitle, questions, subject, grade]);
 
   if (!isOpen || !questions || questions.length === 0) return null;
 
-  const effectiveStudentUrl = shortenedUrl || fullShareUrl;
+  // For QR code: ONLY use short URL (never massive 3KB full URL) to prevent "Data too long"
+  const qrCodeUrl = (shortenedUrl && shortenedUrl.length < 1200) ? shortenedUrl : '';
 
-  const handleCopyLink = async (text: string, type: 'tiny' | 'full') => {
-    if (!text) return;
+  const handleCopyLink = async (text: string) => {
+    const targetUrl = text || fullShareUrl;
+    if (!targetUrl) return;
     try {
-      await navigator.clipboard.writeText(text);
-      if (type === 'tiny') {
-        setCopiedTiny(true);
-        setTimeout(() => setCopiedTiny(false), 2500);
-      } else {
-        setCopiedFull(true);
-        setTimeout(() => setCopiedFull(false), 2500);
-      }
+      await navigator.clipboard.writeText(targetUrl);
+      setCopiedTiny(true);
+      setTimeout(() => setCopiedTiny(false), 2500);
     } catch (err) {
       console.error("Failed to copy", err);
     }
@@ -119,45 +184,44 @@ const ShareModal: React.FC<ShareModalProps> = ({
   const downloadQrCode = () => {
     const svg = document.getElementById('quiz-qr-code-svg');
     if (!svg) return;
-    const svgData = new XMLSerializer().serializeToString(svg);
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    const img = new Image();
-    img.onload = () => {
-      canvas.width = 600;
-      canvas.height = 680;
-      if (ctx) {
-        // Background white card
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    try {
+      const svgData = new XMLSerializer().serializeToString(svg);
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      const img = new Image();
+      img.onload = () => {
+        canvas.width = 600;
+        canvas.height = 680;
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // Header Title
-        ctx.fillStyle = '#1e293b';
-        ctx.font = 'bold 22px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(quizTitle.substring(0, 45), 300, 45);
+          ctx.fillStyle = '#1e293b';
+          ctx.font = 'bold 22px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(quizTitle.substring(0, 45), 300, 45);
 
-        // Subtitle
-        ctx.fillStyle = '#64748b';
-        ctx.font = '16px sans-serif';
-        ctx.fillText(`Quét mã để làm bài tập (${questions.length} câu hỏi)`, 300, 75);
+          ctx.fillStyle = '#64748b';
+          ctx.font = '16px sans-serif';
+          ctx.fillText(`Quét mã để làm bài tập (${questions.length} câu hỏi)`, 300, 75);
 
-        // Draw QR Image in center
-        ctx.drawImage(img, 60, 100, 480, 480);
+          ctx.drawImage(img, 60, 100, 480, 480);
 
-        // Footer note
-        ctx.fillStyle = '#059669';
-        ctx.font = 'bold 15px sans-serif';
-        ctx.fillText(shortenedUrl || 'Không giới hạn thời gian & lượt truy cập', 300, 625);
+          ctx.fillStyle = '#059669';
+          ctx.font = 'bold 15px sans-serif';
+          ctx.fillText(shortenedUrl || 'Không giới hạn thời gian & lượt truy cập', 300, 625);
 
-        const pngFile = canvas.toDataURL('image/png');
-        const downloadLink = document.createElement('a');
-        downloadLink.download = `Ma-QR-${subject || 'Bai-Tap'}.png`;
-        downloadLink.href = pngFile;
-        downloadLink.click();
-      }
-    };
-    img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+          const pngFile = canvas.toDataURL('image/png');
+          const downloadLink = document.createElement('a');
+          downloadLink.download = `Ma-QR-${subject || 'Bai-Tap'}.png`;
+          downloadLink.href = pngFile;
+          downloadLink.click();
+        }
+      };
+      img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+    } catch (err) {
+      console.error("Failed to download QR", err);
+    }
   };
 
   return (
@@ -184,11 +248,10 @@ const ShareModal: React.FC<ShareModalProps> = ({
 
             {/* Huge QR Container */}
             <div className="p-8 bg-white rounded-3xl shadow-2xl border-4 border-emerald-400 max-w-[380px] w-full aspect-square flex items-center justify-center">
-              <QRCodeSVG
-                value={effectiveStudentUrl || 'https://giaoviendoimoi.com'}
-                size={320}
+              <SafeQRCode
+                value={qrCodeUrl}
+                size={300}
                 level="M"
-                includeMargin={false}
               />
             </div>
 
@@ -199,12 +262,14 @@ const ShareModal: React.FC<ShareModalProps> = ({
                 </div>
               )}
               <div className="flex items-center justify-center gap-4 pt-2">
-                <button
-                  onClick={downloadQrCode}
-                  className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl font-bold text-sm shadow-lg flex items-center gap-2 transition-all active:scale-95"
-                >
-                  <Download className="w-4 h-4" /> Tải ảnh QR Code
-                </button>
+                {qrCodeUrl && (
+                  <button
+                    onClick={downloadQrCode}
+                    className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl font-bold text-sm shadow-lg flex items-center gap-2 transition-all active:scale-95"
+                  >
+                    <Download className="w-4 h-4" /> Tải ảnh QR Code
+                  </button>
+                )}
                 <button
                   onClick={() => setIsFullScreenQR(false)}
                   className="px-6 py-3 bg-white/10 hover:bg-white/20 text-white rounded-2xl font-bold text-sm transition-all"
@@ -274,7 +339,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
               {/* Link Display Box */}
               <div className="space-y-2">
                 <div className="bg-white border border-emerald-300 rounded-xl px-3 py-2.5 text-xs text-slate-800 font-mono font-semibold select-all outline-none truncate shadow-inner">
-                  {isShortening ? (
+                  {isShortening && !shortenedUrl ? (
                     <span className="text-slate-400 italic flex items-center gap-1.5">
                       <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-600" /> Đang tạo link siêu ngắn...
                     </span>
@@ -287,7 +352,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
 
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => handleCopyLink(effectiveStudentUrl, 'tiny')}
+                    onClick={() => handleCopyLink(shortenedUrl || fullShareUrl)}
                     className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-bold text-xs text-white transition-all shadow-md active:scale-95 ${
                       copiedTiny
                         ? 'bg-emerald-700 shadow-emerald-600/20'
@@ -333,15 +398,14 @@ const ShareModal: React.FC<ShareModalProps> = ({
                 </p>
               </div>
 
-              {/* QR Code Container */}
+              {/* QR Code Container with Safe Rendering */}
               <div className="flex items-center justify-center">
-                <div className="p-3 bg-white rounded-2xl shadow-sm border border-purple-200 flex flex-col items-center">
-                  <QRCodeSVG
+                <div className="p-2 bg-white rounded-2xl shadow-sm border border-purple-200 flex flex-col items-center">
+                  <SafeQRCode
                     id="quiz-qr-code-svg"
-                    value={effectiveStudentUrl || 'https://giaoviendoimoi.com'}
+                    value={qrCodeUrl}
                     size={130}
                     level="M"
-                    includeMargin={true}
                   />
                 </div>
               </div>
@@ -350,13 +414,15 @@ const ShareModal: React.FC<ShareModalProps> = ({
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={downloadQrCode}
-                  className="flex items-center justify-center gap-1 py-2 px-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-bold shadow-md transition-all active:scale-95"
+                  disabled={!qrCodeUrl}
+                  className="flex items-center justify-center gap-1 py-2 px-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-bold shadow-md transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Download className="w-3.5 h-3.5" /> Tải ảnh QR
                 </button>
                 <button
                   onClick={() => setIsFullScreenQR(true)}
-                  className="flex items-center justify-center gap-1 py-2 px-2.5 bg-white hover:bg-purple-50 text-purple-700 border border-purple-300 rounded-xl text-xs font-bold transition-all active:scale-95"
+                  disabled={!qrCodeUrl}
+                  className="flex items-center justify-center gap-1 py-2 px-2.5 bg-white hover:bg-purple-50 text-purple-700 border border-purple-300 rounded-xl text-xs font-bold transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Maximize2 className="w-3.5 h-3.5" /> Chiếu lên bảng
                 </button>
