@@ -11,25 +11,35 @@ export interface SharedQuizPackage {
   errorMessage?: string;
 }
 
-// Compact minified question format (v2 - ultra lightweight)
-interface UltraCompactQuestion {
+// Ultra-compressed tuple format (v3 - maximum compression for Zalo & QR scan speed)
+// Format: [version: 3, title, subject, grade, [ [question, [opt1, opt2, ...], correctIndex, level, explanation] ]]
+type UltraTupleQuiz = [
+  number, // 0: version (3)
+  string, // 1: title
+  string, // 2: subject
+  string, // 3: grade
+  [string, string[], number, string, string][] // 4: questions array
+];
+
+// Compact v2 format for backward compatibility
+interface UltraCompactQuestionV2 {
   i?: number;
   q: string;
-  o: string[]; // Options text array: ["Opt A", "Opt B", "Opt C", "Opt D"]
-  a: string | number; // Correct answer key ('A' or 0)
-  l?: string; // Level
-  e?: string; // Explanation
+  o: string[];
+  a: string | number;
+  l?: string;
+  e?: string;
 }
 
-interface UltraCompactQuizPackage {
-  v?: number; // version 2
+interface UltraCompactQuizPackageV2 {
+  v?: number;
   t: string;
   s?: string;
   g?: string;
-  q: UltraCompactQuestion[];
+  q: UltraCompactQuestionV2[];
 }
 
-// Legacy v1 compact format for backward compatibility
+// Legacy v1 compact format
 interface LegacyCompactOption {
   k: string;
   t: string;
@@ -52,7 +62,10 @@ interface LegacyCompactQuizPackage {
 }
 
 /**
- * Creates an ultra-compact self-contained URL (works 100% offline & without server persistence)
+ * Creates a 100% Native, self-contained URL using your web domain.
+ * - Does NOT use 3rd party shorteners (TinyURL) -> 100% accepted by Zalo, Facebook, SMS, Safari, Chrome, iOS & Android.
+ * - Works offline and on static hosts (Vercel, Netlify, GitHub Pages).
+ * - Never expires, unlimited students.
  */
 export function createSelfContainedQuizUrl(
   title: string,
@@ -62,29 +75,37 @@ export function createSelfContainedQuizUrl(
   targetOrigin?: string
 ): string {
   try {
-    const compact: UltraCompactQuizPackage = {
-      v: 2,
-      t: title,
-      s: subject,
-      g: grade,
-      q: questions.map((q, idx) => ({
-        i: idx + 1,
-        q: q.question_content,
-        o: q.options.map(opt => opt.text),
-        a: q.correct_answer,
-        l: q.level,
-        e: q.explanation || ''
-      }))
-    };
+    // Pack into ultra-dense tuple (Version 3)
+    const tuple: UltraTupleQuiz = [
+      3,
+      title || '',
+      subject || '',
+      grade || '',
+      questions.map(q => {
+        let correctIdx = 0;
+        if (typeof q.correct_answer === 'string') {
+          const charCode = q.correct_answer.toUpperCase().charCodeAt(0);
+          if (charCode >= 65 && charCode <= 90) {
+            correctIdx = charCode - 65;
+          }
+        }
+        return [
+          q.question_content || '',
+          q.options ? q.options.map(o => o.text || '') : [],
+          correctIdx,
+          q.level || '',
+          q.explanation || ''
+        ];
+      })
+    ];
 
-    const jsonStr = JSON.stringify(compact);
+    const jsonStr = JSON.stringify(tuple);
     const compressed = LZString.compressToEncodedURIComponent(jsonStr);
     
     let base = targetOrigin || (typeof window !== 'undefined' ? window.location.origin + window.location.pathname : '');
-    // Ensure base ends cleanly before hash
-    if (base.endsWith('#') || base.endsWith('/')) {
-      base = base.replace(/[#/]+$/, '');
-    }
+    // Clean trailing slashes or hashes
+    base = base.replace(/[#/]+$/, '');
+    
     return `${base}/#quiz=${compressed}`;
   } catch (err) {
     console.error("Failed to encode ultra-compact quiz URL", err);
@@ -93,76 +114,7 @@ export function createSelfContainedQuizUrl(
 }
 
 /**
- * Calls URL Shortener services (via backend proxy or direct TinyURL/is.gd API)
- */
-export async function shortenUrl(longUrl: string): Promise<string> {
-  if (!longUrl) return '';
-
-  // 1. Try server proxy first to avoid any client CORS issues
-  try {
-    const res = await fetch('/api/shorten-url', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: longUrl })
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.shortUrl) {
-        return data.shortUrl;
-      }
-    }
-  } catch (err) {
-    console.warn("Server URL shortener proxy failed, trying direct fallback...", err);
-  }
-
-  // 2. Direct TinyURL API fallback
-  try {
-    const tinyRes = await fetch(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`, {
-      method: 'GET',
-      mode: 'cors'
-    });
-    if (tinyRes.ok) {
-      const short = await tinyRes.text();
-      if (short && short.startsWith('http')) {
-        return short.trim();
-      }
-    }
-  } catch (err) {
-    console.warn("Direct TinyURL call failed:", err);
-  }
-
-  // 3. Direct is.gd API fallback
-  try {
-    const isgdRes = await fetch(`https://is.gd/create.php?format=json&url=${encodeURIComponent(longUrl)}`);
-    if (isgdRes.ok) {
-      const data = await isgdRes.json();
-      if (data && data.shorturl) {
-        return data.shorturl;
-      }
-    }
-  } catch (err) {
-    console.warn("Direct is.gd call failed:", err);
-  }
-
-  return '';
-}
-
-/**
- * Creates short URL via server memory store as alternative
- */
-export async function createShortQuizUrl(
-  title: string,
-  questions: QuizQuestion[],
-  subject?: string,
-  grade?: string,
-  targetOrigin?: string
-): Promise<string> {
-  // Always default to ultra-compact self-contained URL so it never expires!
-  return createSelfContainedQuizUrl(title, questions, subject, grade, targetOrigin);
-}
-
-/**
- * Decodes quiz package from current URL (supports ultra-compact v2, legacy v1, short code, and uncompressed)
+ * Decodes quiz package from current URL (supports Tuple v3, Object v2, Legacy v1, and Server codes)
  */
 export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
   if (typeof window === 'undefined') return null;
@@ -206,9 +158,40 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
       if (jsonStr) {
         const parsed = JSON.parse(jsonStr);
 
-        // Version 2 ultra-compact format: q: [{ q: "...", o: ["A", "B", ...], a: "A" }]
+        // Version 3 Tuple Format: [3, title, subject, grade, [ [q, opts, ansIdx, level, exp] ]]
+        if (Array.isArray(parsed) && parsed[0] === 3) {
+          const tuple = parsed as UltraTupleQuiz;
+          const questionsList: QuizQuestion[] = tuple[4].map((item, idx) => {
+            const [qText, opts, correctIdx, level, exp] = item;
+            const options = (opts || []).map((optText, oIdx) => ({
+              key: String.fromCharCode(65 + oIdx),
+              text: optText
+            }));
+            
+            const correctKey = String.fromCharCode(65 + (typeof correctIdx === 'number' ? correctIdx : 0));
+
+            return {
+              id: idx + 1,
+              question_content: qText,
+              options,
+              correct_answer: correctKey,
+              level: level || 'Nhận biết',
+              explanation: exp || ''
+            };
+          });
+
+          return {
+            title: tuple[1] || 'Bài tập ôn tập',
+            subject: tuple[2],
+            grade: tuple[3],
+            isSharedLink: true,
+            questions: questionsList
+          };
+        }
+
+        // Version 2 ultra-compact format: { v: 2, t, s, g, q: [{ q, o, a, l, e }] }
         if (parsed && Array.isArray(parsed.q) && parsed.v === 2) {
-          const ultra = parsed as UltraCompactQuizPackage;
+          const ultra = parsed as UltraCompactQuizPackageV2;
           const questionsList: QuizQuestion[] = ultra.q.map((uq, idx) => {
             const options = uq.o.map((optText, oIdx) => ({
               key: String.fromCharCode(65 + oIdx),
@@ -241,7 +224,7 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
           };
         }
 
-        // Version 1 legacy format: q: [{ i, q, o: [{k, t}], a, l, e }]
+        // Version 1 legacy format: { t, s, g, q: [{ i, q, o: [{k, t}], a, l, e }] }
         if (parsed && Array.isArray(parsed.q)) {
           const compact = parsed as LegacyCompactQuizPackage;
           return {
