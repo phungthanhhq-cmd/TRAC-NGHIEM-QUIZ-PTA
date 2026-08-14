@@ -234,6 +234,47 @@ async function startServer() {
     }
   });
 
+  // API Route: Shorten URL using TinyURL / is.gd
+  app.post('/api/shorten-url', async (req, res) => {
+    try {
+      const { url } = req.body;
+      if (!url || typeof url !== 'string') {
+        return res.status(400).json({ error: 'URL không hợp lệ' });
+      }
+
+      // Try TinyURL first
+      try {
+        const tinyRes = await fetch(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(url)}`);
+        if (tinyRes.ok) {
+          const shortUrl = await tinyRes.text();
+          if (shortUrl && shortUrl.startsWith('http')) {
+            return res.json({ shortUrl: shortUrl.trim() });
+          }
+        }
+      } catch (e) {
+        console.warn("TinyURL failed, trying is.gd...", e);
+      }
+
+      // Try is.gd fallback
+      try {
+        const isgdRes = await fetch(`https://is.gd/create.php?format=json&url=${encodeURIComponent(url)}`);
+        if (isgdRes.ok) {
+          const data = (await isgdRes.json()) as any;
+          if (data && data.shorturl) {
+            return res.json({ shortUrl: data.shorturl });
+          }
+        }
+      } catch (e) {
+        console.warn("is.gd failed...", e);
+      }
+
+      return res.status(500).json({ error: 'Không thể rút gọn link lúc này' });
+    } catch (err: any) {
+      console.error('Error in /api/shorten-url:', err);
+      return res.status(500).json({ error: err?.message || 'Lỗi rút gọn link' });
+    }
+  });
+
   // API Route: Save quiz and return a short code
   app.post('/api/share', (req, res) => {
     try {
