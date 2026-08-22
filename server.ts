@@ -1,11 +1,17 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import cors from 'cors';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 
-const DEFAULT_MODEL = "gemini-3.6-flash";
-const CANDIDATE_MODELS = ["gemini-3.6-flash", "gemini-flash-latest"];
+export const DEFAULT_MODEL = "gemini-3.7-flash";
+export const CANDIDATE_MODELS = [
+  "gemini-3.7-flash",
+  "gemini-flash-latest",
+  "gemini-3.1-flash-lite",
+  "gemini-2.5-flash"
+];
 
 // In-memory quiz store (maps short 6-character code to quiz package)
 interface QuizStoreItem {
@@ -13,11 +19,99 @@ interface QuizStoreItem {
   title: string;
   subject?: string;
   grade?: string;
+  teacherId?: string;
   questions: any[];
   createdAt: number;
 }
 
 const quizStore = new Map<string, QuizStoreItem>();
+
+// Submissions store structure
+interface QuestionAnswerDetail {
+  questionId: number;
+  question: string;
+  selectedAnswer: string;
+  correctAnswer: string;
+  isCorrect: boolean;
+  explanation?: string;
+}
+
+interface SubmissionStoreItem {
+  id: string;
+  teacherId: string;
+  teacherEmail?: string;
+  quizTitle: string;
+  subject?: string;
+  grade?: string;
+  studentName: string;
+  studentClass: string;
+  score: number;
+  correctCount: number;
+  totalCount: number;
+  timeSpentSeconds: number;
+  submittedAt: number;
+  attemptNumber: number;
+  answersDetails?: QuestionAnswerDetail[];
+}
+
+interface ClassRosterItem {
+  id: string;
+  teacherId: string;
+  teacherEmail?: string;
+  className: string;
+  studentNames: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+const SUBMISSIONS_FILE = path.join(process.cwd(), 'submissions.json');
+const CLASS_ROSTERS_FILE = path.join(process.cwd(), 'class_rosters.json');
+
+let submissions: SubmissionStoreItem[] = [];
+let classRosters: ClassRosterItem[] = [];
+
+// Load submissions and class rosters from disk on startup
+try {
+  if (fs.existsSync(SUBMISSIONS_FILE)) {
+    const rawData = fs.readFileSync(SUBMISSIONS_FILE, 'utf-8');
+    submissions = JSON.parse(rawData);
+    if (!Array.isArray(submissions)) {
+      submissions = [];
+    }
+  }
+} catch (e) {
+  console.warn("Failed to load submissions.json, starting fresh", e);
+  submissions = [];
+}
+
+try {
+  if (fs.existsSync(CLASS_ROSTERS_FILE)) {
+    const rawData = fs.readFileSync(CLASS_ROSTERS_FILE, 'utf-8');
+    classRosters = JSON.parse(rawData);
+    if (!Array.isArray(classRosters)) {
+      classRosters = [];
+    }
+  }
+} catch (e) {
+  console.warn("Failed to load class_rosters.json, starting fresh", e);
+  classRosters = [];
+}
+
+function saveSubmissionsToFile() {
+  try {
+    fs.writeFileSync(SUBMISSIONS_FILE, JSON.stringify(submissions, null, 2), 'utf-8');
+  } catch (e) {
+    console.error("Failed to write submissions.json", e);
+  }
+}
+
+function saveClassRostersToFile() {
+  try {
+    fs.writeFileSync(CLASS_ROSTERS_FILE, JSON.stringify(classRosters, null, 2), 'utf-8');
+  } catch (e) {
+    console.error("Failed to write class_rosters.json", e);
+  }
+}
 
 function generateShortCode(): string {
   const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -53,18 +147,238 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(cors());
-  app.use(express.json({ limit: '20mb' }));
+  app.use(express.json({ limit: '25mb' }));
 
-  // API Route: Generate quiz via Gemini server-side (BYOK strictly)
+  // API Route: Check API readiness & server capabilities
+  app.get('/api/status', (req, res) => {
+    const hasServerKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim().length > 0;
+    return res.json({
+      status: 'ok',
+      hasServerKey,
+      defaultModel: DEFAULT_MODEL,
+      supportedModels: CANDIDATE_MODELS
+    });
+  });
+
+  // API Route: Student submits quiz result
+  app.post('/api/submit-quiz', (req, res) => {
+    try {
+      const {
+        teacherId,
+        teacherEmail,
+        quizTitle,
+        subject,
+        grade,
+        studentName,
+        studentClass,
+        score,
+        correctCount,
+        totalCount,
+        timeSpentSeconds,
+        answersDetails
+      } = req.body;
+
+      const tId = (teacherId && typeof teacherId === 'string') ? teacherId.trim() : 'tea_default';
+      const tEmail = (teacherEmail && typeof teacherEmail === 'string') ? teacherEmail.trim().toLowerCase() : '';
+      const sName = (studentName && typeof studentName === 'string' && studentName.trim()) 
+        ? studentName.trim() 
+        : 'Học sinh';
+      const sClass = (studentClass && typeof studentClass === 'string') ? studentClass.trim() : '';
+
+      // Count previous attempts for this student on this quiz & teacher
+      const previousAttempts = submissions.filter(s => 
+        (s.teacherId === tId || (tEmail && s.teacherEmail && s.teacherEmail.toLowerCase() === tEmail)) &&
+        s.quizTitle === quizTitle &&
+        s.studentName.toLowerCase() === sName.toLowerCase() &&
+        (sClass ? s.studentClass.toLowerCase() === sClass.toLowerCase() : true)
+      );
+
+      const attemptNumber = previousAttempts.length + 1;
+
+      const newSubmission: SubmissionStoreItem = {
+        id: 'sub_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+        teacherId: tId,
+        teacherEmail: tEmail || undefined,
+        quizTitle: quizTitle || 'Bài tập ôn tập',
+        subject: subject || '',
+        grade: grade || '',
+        studentName: sName,
+        studentClass: sClass,
+        score: typeof score === 'number' ? score : 0,
+        correctCount: typeof correctCount === 'number' ? correctCount : 0,
+        totalCount: typeof totalCount === 'number' ? totalCount : 0,
+        timeSpentSeconds: typeof timeSpentSeconds === 'number' ? timeSpentSeconds : 0,
+        submittedAt: Date.now(),
+        attemptNumber,
+        answersDetails: Array.isArray(answersDetails) ? answersDetails : undefined
+      };
+
+      submissions.unshift(newSubmission);
+      saveSubmissionsToFile();
+
+      return res.json({ 
+        success: true, 
+        submissionId: newSubmission.id,
+        attemptNumber,
+        message: 'Đã nộp bài thành công!'
+      });
+    } catch (err: any) {
+      console.error('Error in /api/submit-quiz:', err);
+      return res.status(500).json({ error: 'Lỗi khi lưu kết quả bài làm' });
+    }
+  });
+
+  // API Route: Teacher retrieves submission records filtered strictly by their teacherId or teacherEmail
+  app.get('/api/teacher-submissions', (req, res) => {
+    try {
+      const { teacherId, teacherEmail } = req.query;
+      const tId = typeof teacherId === 'string' ? teacherId.trim() : '';
+      const tEmail = typeof teacherEmail === 'string' ? teacherEmail.trim().toLowerCase() : '';
+
+      if (!tId && !tEmail) {
+        return res.status(400).json({ error: 'Thiếu mã định danh giáo viên hoặc email' });
+      }
+
+      // Filter submissions belonging to this teacher by ID or by Gmail
+      const teacherSubs = submissions.filter(s => {
+        if (tId && s.teacherId === tId) return true;
+        if (tEmail && s.teacherEmail && s.teacherEmail.toLowerCase() === tEmail) return true;
+        if (s.teacherId === 'tea_default' || !s.teacherId) return true;
+        return false;
+      });
+
+      return res.json({ submissions: teacherSubs });
+    } catch (err) {
+      console.error('Error fetching teacher submissions:', err);
+      return res.status(500).json({ error: 'Lỗi khi lấy danh sách kết quả học sinh' });
+    }
+  });
+
+  // API Route: Delete single or clear all submissions for a teacher
+  app.delete('/api/teacher-submissions/:id', (req, res) => {
+    try {
+      const { id } = req.params;
+      const { teacherId, teacherEmail } = req.query;
+      const tId = typeof teacherId === 'string' ? teacherId.trim() : '';
+      const tEmail = typeof teacherEmail === 'string' ? teacherEmail.trim().toLowerCase() : '';
+
+      if (!tId && !tEmail) {
+        return res.status(400).json({ error: 'Thiếu mã định danh giáo viên' });
+      }
+
+      const isTeacherMatch = (s: SubmissionStoreItem) => {
+        if (tId && s.teacherId === tId) return true;
+        if (tEmail && s.teacherEmail && s.teacherEmail.toLowerCase() === tEmail) return true;
+        return false;
+      };
+
+      if (id === 'clear-all') {
+        submissions = submissions.filter(s => !isTeacherMatch(s));
+      } else {
+        submissions = submissions.filter(s => !(s.id === id && isTeacherMatch(s)));
+      }
+      saveSubmissionsToFile();
+
+      return res.json({ success: true });
+    } catch (err) {
+      console.error('Error deleting submission:', err);
+      return res.status(500).json({ error: 'Lỗi khi xóa kết quả' });
+    }
+  });
+
+  // API Route: Get class rosters for a teacher
+  app.get('/api/class-rosters', (req, res) => {
+    try {
+      const { teacherId, teacherEmail } = req.query;
+      const tId = typeof teacherId === 'string' ? teacherId.trim() : '';
+      const tEmail = typeof teacherEmail === 'string' ? teacherEmail.trim().toLowerCase() : '';
+
+      const matched = classRosters.filter(r => {
+        if (tId && r.teacherId === tId) return true;
+        if (tEmail && r.teacherEmail && r.teacherEmail.toLowerCase() === tEmail) return true;
+        return false;
+      });
+
+      return res.json({ rosters: matched });
+    } catch (err) {
+      console.error('Error fetching class rosters:', err);
+      return res.status(500).json({ error: 'Lỗi khi lấy danh sách lớp' });
+    }
+  });
+
+  // API Route: Save or update a class roster
+  app.post('/api/class-rosters', (req, res) => {
+    try {
+      const { id, teacherId, teacherEmail, className, studentNames } = req.body;
+      const tId = (teacherId && typeof teacherId === 'string') ? teacherId.trim() : 'tea_default';
+      const tEmail = (teacherEmail && typeof teacherEmail === 'string') ? teacherEmail.trim().toLowerCase() : '';
+      const cName = (className && typeof className === 'string') ? className.trim() : '';
+      const names = Array.isArray(studentNames) 
+        ? studentNames.map((n: string) => String(n).trim()).filter((n: string) => n.length > 0)
+        : [];
+
+      if (!cName) {
+        return res.status(400).json({ error: 'Tên lớp không được để trống' });
+      }
+
+      const existingIdx = classRosters.findIndex(r => 
+        (id && r.id === id) || 
+        (r.className.toLowerCase() === cName.toLowerCase() && (r.teacherId === tId || (tEmail && r.teacherEmail === tEmail)))
+      );
+
+      const rosterItem: ClassRosterItem = {
+        id: id || ('ros_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6)),
+        teacherId: tId,
+        teacherEmail: tEmail || undefined,
+        className: cName,
+        studentNames: names,
+        createdAt: existingIdx >= 0 ? classRosters[existingIdx].createdAt : Date.now(),
+        updatedAt: Date.now()
+      };
+
+      if (existingIdx >= 0) {
+        classRosters[existingIdx] = rosterItem;
+      } else {
+        classRosters.push(rosterItem);
+      }
+
+      saveClassRostersToFile();
+      return res.json({ success: true, roster: rosterItem });
+    } catch (err) {
+      console.error('Error saving class roster:', err);
+      return res.status(500).json({ error: 'Lỗi khi lưu danh sách lớp' });
+    }
+  });
+
+  // API Route: Delete a class roster
+  app.delete('/api/class-rosters/:id', (req, res) => {
+    try {
+      const { id } = req.params;
+      classRosters = classRosters.filter(r => r.id !== id);
+      saveClassRostersToFile();
+      return res.json({ success: true });
+    } catch (err) {
+      console.error('Error deleting class roster:', err);
+      return res.status(500).json({ error: 'Lỗi khi xóa danh sách lớp' });
+    }
+  });
+
+  // API Route: Generate quiz via Gemini server-side
   app.post('/api/generate-quiz', async (req, res) => {
     try {
       const { promptText, fileParts, optionCount, isTrueFalse, userApiKey } = req.body;
 
-      const trimmedKey = typeof userApiKey === 'string' ? userApiKey.trim() : '';
+      const trimmedUserKey = typeof userApiKey === 'string' ? userApiKey.trim() : '';
+      const serverEnvKey = (process.env.GEMINI_API_KEY || '').trim();
 
-      if (!trimmedKey) {
+      // Determine keys to attempt (User key first, then Server environment key as fallback)
+      const keysToTry: string[] = [];
+      if (trimmedUserKey) keysToTry.push(trimmedUserKey);
+      if (serverEnvKey && !keysToTry.includes(serverEnvKey)) keysToTry.push(serverEnvKey);
+
+      if (keysToTry.length === 0) {
         return res.status(400).json({ 
-          error: '🔑 Bạn chưa kết nối Gemini API.\n\nVui lòng nhập API Key của bạn trước khi tạo câu hỏi.' 
+          error: '🔑 Bạn chưa kết nối Gemini API.\n\nVui lòng mở mục "Cấu hình Gemini API" và nhập API Key của bạn để bắt đầu tạo câu hỏi.' 
         });
       }
 
@@ -96,64 +410,65 @@ async function startServer() {
         }
       };
 
-      const ai = new GoogleGenAI({ 
-        apiKey: trimmedKey,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build-byok',
-          }
-        }
-      });
-
       let responseText: string | undefined;
       let lastError: any = null;
 
-      for (const targetModel of CANDIDATE_MODELS) {
-        try {
-          const response = await ai.models.generateContent({
-            model: targetModel,
-            contents: {
-              parts: [...(fileParts || []), { text: promptText }]
-            },
-            config: {
-              systemInstruction: SYSTEM_INSTRUCTION,
-              responseMimeType: "application/json",
-              responseSchema: dynamicQuizSchema,
-              temperature: 0.4,
+      // Outer loop: Try available API keys
+      for (const currentKey of keysToTry) {
+        const ai = new GoogleGenAI({ apiKey: currentKey });
+
+        // Inner loop: Try candidate models
+        for (const targetModel of CANDIDATE_MODELS) {
+          try {
+            const response = await ai.models.generateContent({
+              model: targetModel,
+              contents: {
+                parts: [...(fileParts || []), { text: promptText }]
+              },
+              config: {
+                systemInstruction: SYSTEM_INSTRUCTION,
+                responseMimeType: "application/json",
+                responseSchema: dynamicQuizSchema,
+                temperature: 0.4,
+              }
+            });
+            responseText = response.text;
+            if (responseText) break;
+          } catch (err: any) {
+            lastError = err;
+            const errStr = String(err?.message || err);
+            
+            // Retry on transient rate limit/server error
+            if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('500') || errStr.includes('503')) {
+              console.warn(`[Server] Rate limit/error with ${targetModel}. Retrying in 1.5s...`);
+              await new Promise(resolve => setTimeout(resolve, 1500));
+              try {
+                const retryRes = await ai.models.generateContent({
+                  model: targetModel,
+                  contents: {
+                    parts: [...(fileParts || []), { text: promptText }]
+                  },
+                  config: {
+                    systemInstruction: SYSTEM_INSTRUCTION,
+                    responseMimeType: "application/json",
+                    responseSchema: dynamicQuizSchema,
+                    temperature: 0.4,
+                  }
+                });
+                responseText = retryRes.text;
+                if (responseText) break;
+              } catch (retryErr) {
+                lastError = retryErr;
+              }
+            } else if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
+              continue; // try next candidate model
+            } else {
+              break; // break candidate models for this key if 403 / permission issue, try next key
             }
-          });
-          responseText = response.text;
-          if (responseText) break;
-        } catch (err: any) {
-          lastError = err;
-          const errStr = String(err?.message || err);
-          if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('500') || errStr.includes('503')) {
-            console.warn("[Server Proxy] Rate limit/error encountered. Single retry in 2000ms...");
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            try {
-              const retryRes = await ai.models.generateContent({
-                model: targetModel,
-                contents: {
-                  parts: [...(fileParts || []), { text: promptText }]
-                },
-                config: {
-                  systemInstruction: SYSTEM_INSTRUCTION,
-                  responseMimeType: "application/json",
-                  responseSchema: dynamicQuizSchema,
-                  temperature: 0.4,
-                }
-              });
-              responseText = retryRes.text;
-              if (responseText) break;
-            } catch (retryErr) {
-              lastError = retryErr;
-            }
-          } else if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
-            continue;
-          } else {
-            break;
           }
         }
+
+        if (responseText) break;
       }
 
       if (!responseText) {
@@ -161,25 +476,19 @@ async function startServer() {
         
         if (rawErrStr.includes('429') || rawErrStr.includes('RESOURCE_EXHAUSTED')) {
           return res.status(429).json({ 
-            error: '⚠️ API Key của bạn đang đạt giới hạn sử dụng tạm thời.\n\nVui lòng:\n• Chờ một lúc rồi thử lại;\n• Kiểm tra hạn mức Gemini API;\n• Hoặc sử dụng API Key khác.' 
+            error: '⚠️ Hạn mức API Gemini đang quá tải tạm thời.\n\nVui lòng:\n• Chờ 10-20 giây rồi bấm "Thử lại ngay";\n• Hoặc vào mục "Cấu hình Gemini API" để đổi API Key khác.' 
           });
         }
 
         if (rawErrStr.includes('401') || rawErrStr.includes('403') || rawErrStr.includes('PERMISSION_DENIED') || rawErrStr.includes('denied access')) {
           return res.status(403).json({ 
-            error: '🔐 API Key không có quyền sử dụng Gemini API hoặc đã bị vô hiệu hóa.' 
+            error: '🔐 Quyền truy cập API Key bị từ chối (403 Permission Denied).\n\nNguyên nhân & Khắc phục:\n1. Dự án Google Cloud của bạn chưa kích hoạt Generative Language API hoặc bị khóa quyền.\n2. Khắc phục: Hãy truy cập aistudio.google.com/app/apikey -> Bấm "Create API key in new project" để lấy mã API Key mới hoàn toàn miễn phí và dán lại vào mục "Cấu hình Gemini API".' 
           });
         }
 
         if (rawErrStr.includes('400') || rawErrStr.includes('API_KEY_INVALID') || rawErrStr.includes('API key not valid')) {
           return res.status(400).json({ 
-            error: '⚠️ API Key hoặc yêu cầu gửi đến Gemini chưa hợp lệ. Vui lòng kiểm tra lại API Key và cấu hình model.' 
-          });
-        }
-
-        if (rawErrStr.includes('404') || rawErrStr.includes('NOT_FOUND')) {
-          return res.status(404).json({ 
-            error: '⚠️ Model Gemini hiện tại không khả dụng hoặc cấu hình API chưa đúng.' 
+            error: '⚠️ Mã API Key Gemini không hợp lệ.\n\nVui lòng kiểm tra lại mã đã sao chép từ Google AI Studio.' 
           });
         }
 
@@ -278,7 +587,7 @@ async function startServer() {
   // API Route: Save quiz and return a short code
   app.post('/api/share', (req, res) => {
     try {
-      const { title, questions, subject, grade } = req.body;
+      const { title, questions, subject, grade, teacherId } = req.body;
       if (!questions || !Array.isArray(questions) || questions.length === 0) {
         return res.status(400).json({ error: 'Nội dung bộ câu hỏi không hợp lệ' });
       }
@@ -293,6 +602,7 @@ async function startServer() {
         title: title || 'Bài tập trắc nghiệm',
         subject,
         grade,
+        teacherId,
         questions,
         createdAt: Date.now()
       };
@@ -324,36 +634,31 @@ async function startServer() {
       const { userApiKey } = req.body;
       const trimmedKey = typeof userApiKey === 'string' ? userApiKey.trim() : '';
 
-      if (!trimmedKey) {
+      const keyToTest = trimmedKey || (process.env.GEMINI_API_KEY || '').trim();
+
+      if (!keyToTest) {
         return res.status(400).json({ 
           success: false, 
           message: '🔑 Bạn chưa kết nối Gemini API. Vui lòng nhập API Key của bạn.' 
         });
       }
 
-      const ai = new GoogleGenAI({ 
-        apiKey: trimmedKey,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build-byok',
-          }
-        }
-      });
+      const ai = new GoogleGenAI({ apiKey: keyToTest });
 
       let lastError: any = null;
       for (const targetModel of CANDIDATE_MODELS) {
         try {
           const response = await ai.models.generateContent({
             model: targetModel,
-            contents: "Xin chào, hãy phản hồi ngắn gọn 'OK'.",
+            contents: "Xin chào, hãy phản hồi 'OK'.",
             config: { temperature: 0.1 }
           });
 
           if (response && response.text) {
             return res.json({
               success: true,
-              message: "🟢 Gemini API: Đã kết nối thành công!",
-              model: targetModel === "gemini-3.6-flash" ? "Gemini 3.6 Flash" : targetModel
+              message: "🟢 Gemini API: Đã kết nối thành công và sẵn sàng tạo câu hỏi!",
+              model: targetModel
             });
           }
         } catch (err: any) {
@@ -371,34 +676,27 @@ async function startServer() {
       if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED')) {
         return res.status(429).json({
           success: false,
-          message: "⚠️ API Key của bạn đang đạt giới hạn sử dụng tạm thời.\n\nVui lòng:\n• Chờ một lúc rồi thử lại;\n• Kiểm tra hạn mức Gemini API;\n• Hoặc sử dụng API Key khác.\n\nChi tiết lỗi từ Google: " + errStr
+          message: "⚠️ API Key của bạn đang đạt giới hạn sử dụng tạm thời.\n\nVui lòng chờ 10-30 giây hoặc sử dụng một API Key mới từ Google AI Studio."
         });
       }
 
       if (errStr.includes('401') || errStr.includes('403') || errStr.includes('PERMISSION_DENIED') || errStr.includes('denied access')) {
         return res.status(403).json({
           success: false,
-          message: "🔐 API Key không có quyền sử dụng Gemini API hoặc Dự án bị từ chối truy cập (Permission Denied).\n\nChi tiết lỗi từ Google: " + errStr + "\n\nNguyên nhân & Cách khắc phục nhanh:\n1. 🌐 API Key bị cài rào cản tên miền (HTTP Referrer): Hãy vào console.cloud.google.com/apis/credentials -> Bấm vào API Key -> Mục 'Application restrictions' chọn 'None' (hoặc thêm domain Vercel của bạn).\n2. 🔑 Mã API Key được tạo từ Google Cloud thay vì AI Studio: Hãy vào aistudio.google.com/app/apikey -> Bấm 'Create API key in new project' để tạo mã mới hoàn toàn miễn phí.\n3. ⚠️ Dự án Google Cloud cũ bị khóa/giới hạn: Tạo 1 API key mới trong dự án mới tại Google AI Studio."
+          message: "🔐 Lỗi 403: Google Cloud Project của API Key này bị từ chối truy cập (Permission Denied).\n\n💡 Cách khắc phục nhanh trong 1 phút:\n1. Mở trang: aistudio.google.com/app/apikey\n2. Bấm 'Create API key' và chọn 'Create API key in new project' (Tạo trong dự án mới).\n3. Sao chép mã AIzaSy... mới và dán vào đây để sử dụng miễn phí không giới hạn."
         });
       }
 
       if (errStr.includes('400') || errStr.includes('API_KEY_INVALID') || errStr.includes('API key not valid')) {
         return res.status(400).json({
           success: false,
-          message: "⚠️ API Key hoặc yêu cầu gửi đến Gemini chưa hợp lệ. Vui lòng kiểm tra lại mã API Key.\n\nChi tiết lỗi từ Google: " + errStr
-        });
-      }
-
-      if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
-        return res.status(404).json({
-          success: false,
-          message: "⚠️ Model Gemini hiện tại không khả dụng trên API Key này.\n\nChi tiết lỗi từ Google: " + errStr
+          message: "⚠️ Mã API Key chưa đúng định dạng. Vui lòng kiểm tra lại chuỗi mã đã copy."
         });
       }
 
       return res.status(500).json({
         success: false,
-        message: `⚠️ Lỗi kết nối Gemini API: ${errStr}`
+        message: `⚠️ Lỗi kết nối: ${errStr}`
       });
     } catch (outerErr: any) {
       return res.status(500).json({
@@ -429,3 +727,4 @@ async function startServer() {
 }
 
 startServer();
+

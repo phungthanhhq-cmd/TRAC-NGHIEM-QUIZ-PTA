@@ -6,19 +6,23 @@ export interface SharedQuizPackage {
   questions: QuizQuestion[];
   subject?: string;
   grade?: string;
+  teacherId?: string;
+  teacherEmail?: string;
   isSharedLink?: boolean;
   isError?: boolean;
   errorMessage?: string;
 }
 
-// Ultra-compressed tuple format (v3 - maximum compression for Zalo & QR scan speed)
-// Format: [version: 3, title, subject, grade, [ [question, [opt1, opt2, ...], correctIndex, level, explanation] ]]
+// Ultra-compressed tuple format (v3/v4 - maximum compression for Zalo & QR scan speed)
+// Format: [version: 3 or 4, title, subject, grade, [ [question, [opt1, opt2, ...], correctIndex, level, explanation] ], teacherId?, teacherEmail?]
 type UltraTupleQuiz = [
-  number, // 0: version (3)
+  number, // 0: version (3 or 4)
   string, // 1: title
   string, // 2: subject
   string, // 3: grade
-  [string, string[], number, string, string][] // 4: questions array
+  [string, string[], number, string, string][], // 4: questions array
+  string?, // 5: teacherId
+  string?  // 6: teacherEmail (e.g. phungthanhhq@gmail.com)
 ];
 
 // Compact v2 format for backward compatibility
@@ -36,6 +40,7 @@ interface UltraCompactQuizPackageV2 {
   t: string;
   s?: string;
   g?: string;
+  tid?: string;
   q: UltraCompactQuestionV2[];
 }
 
@@ -58,12 +63,82 @@ interface LegacyCompactQuizPackage {
   t: string;
   s?: string;
   g?: string;
+  tid?: string;
   q: LegacyCompactQuestion[];
+}
+
+export const DEFAULT_TEACHER_EMAIL = 'phungthanhhq@gmail.com';
+
+/**
+ * Gets the current teacher's Gmail address
+ */
+export function getTeacherEmail(): string {
+  if (typeof window === 'undefined') return DEFAULT_TEACHER_EMAIL;
+  return localStorage.getItem('teacher_gmail') || DEFAULT_TEACHER_EMAIL;
+}
+
+/**
+ * Sets or updates the teacher's Gmail address
+ */
+export function setTeacherEmail(email: string): void {
+  if (typeof window === 'undefined') return;
+  const clean = (email || '').trim().toLowerCase();
+  if (clean) {
+    localStorage.setItem('teacher_gmail', clean);
+  }
+}
+
+/**
+ * Derives a deterministic teacher ID from the teacher's Gemini API key (or local storage/email).
+ * This ensures each teacher only accesses the submissions for their own quizzes!
+ */
+export function getTeacherId(apiKey?: string, email?: string): string {
+  if (typeof window === 'undefined') return 'tea_default';
+
+  const teacherEmail = email || getTeacherEmail();
+  const key = apiKey || localStorage.getItem('gemini_user_api_key') || '';
+  
+  if (key.trim()) {
+    // Generate deterministic clean hash from API key
+    let hash = 0;
+    const str = key.trim();
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash |= 0;
+    }
+    const cleanHash = Math.abs(hash).toString(36);
+    const suffix = str.length > 4 ? str.slice(-4) : 'key';
+    return `tea_${cleanHash}_${suffix}`;
+  }
+
+  if (teacherEmail.trim()) {
+    // Generate deterministic clean hash from teacher Gmail
+    let hash = 0;
+    const str = teacherEmail.trim().toLowerCase();
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash |= 0;
+    }
+    const cleanHash = Math.abs(hash).toString(36);
+    const prefix = str.split('@')[0].slice(0, 5).replace(/[^a-zA-Z0-9]/g, '');
+    return `tea_${prefix}_${cleanHash}`;
+  }
+
+  // Fallback persistent ID for this teacher browser if no API key
+  let fallbackId = localStorage.getItem('teacher_device_id');
+  if (!fallbackId) {
+    fallbackId = 'tea_' + Math.random().toString(36).substring(2, 10);
+    localStorage.setItem('teacher_device_id', fallbackId);
+  }
+  return fallbackId;
 }
 
 /**
  * Creates a 100% Native, self-contained URL using your web domain.
  * - Does NOT use 3rd party shorteners (TinyURL) -> 100% accepted by Zalo, Facebook, SMS, Safari, Chrome, iOS & Android.
+ * - Encodes teacherId & teacherEmail so student submissions automatically map to the teacher's dashboard.
  * - Works offline and on static hosts (Vercel, Netlify, GitHub Pages).
  * - Never expires, unlimited students.
  */
@@ -72,10 +147,15 @@ export function createSelfContainedQuizUrl(
   questions: QuizQuestion[],
   subject?: string,
   grade?: string,
-  targetOrigin?: string
+  targetOrigin?: string,
+  teacherId?: string,
+  teacherEmail?: string
 ): string {
   try {
-    // Pack into ultra-dense tuple (Version 3)
+    const currentTeacherEmail = teacherEmail || getTeacherEmail();
+    const currentTeacherId = teacherId || getTeacherId(undefined, currentTeacherEmail);
+
+    // Pack into ultra-dense tuple (Version 3/4)
     const tuple: UltraTupleQuiz = [
       3,
       title || '',
@@ -96,7 +176,9 @@ export function createSelfContainedQuizUrl(
           q.level || '',
           q.explanation || ''
         ];
-      })
+      }),
+      currentTeacherId,
+      currentTeacherEmail
     ];
 
     const jsonStr = JSON.stringify(tuple);
@@ -158,7 +240,7 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
       if (jsonStr) {
         const parsed = JSON.parse(jsonStr);
 
-        // Version 3 Tuple Format: [3, title, subject, grade, [ [q, opts, ansIdx, level, exp] ]]
+        // Version 3 Tuple Format: [3, title, subject, grade, [ [q, opts, ansIdx, level, exp] ], teacherId?]
         if (Array.isArray(parsed) && parsed[0] === 3) {
           const tuple = parsed as UltraTupleQuiz;
           const questionsList: QuizQuestion[] = tuple[4].map((item, idx) => {
@@ -184,12 +266,14 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
             title: tuple[1] || 'Bài tập ôn tập',
             subject: tuple[2],
             grade: tuple[3],
+            teacherId: tuple[5],
+            teacherEmail: tuple[6] || DEFAULT_TEACHER_EMAIL,
             isSharedLink: true,
             questions: questionsList
           };
         }
 
-        // Version 2 ultra-compact format: { v: 2, t, s, g, q: [{ q, o, a, l, e }] }
+        // Version 2 ultra-compact format: { v: 2, t, s, g, tid, q: [{ q, o, a, l, e }] }
         if (parsed && Array.isArray(parsed.q) && parsed.v === 2) {
           const ultra = parsed as UltraCompactQuizPackageV2;
           const questionsList: QuizQuestion[] = ultra.q.map((uq, idx) => {
@@ -219,6 +303,7 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
             title: ultra.t || 'Bài tập ôn tập',
             subject: ultra.s,
             grade: ultra.g,
+            teacherId: ultra.tid,
             isSharedLink: true,
             questions: questionsList
           };
@@ -231,6 +316,7 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
             title: compact.t || 'Bài tập ôn tập',
             subject: compact.s,
             grade: compact.g,
+            teacherId: compact.tid,
             isSharedLink: true,
             questions: compact.q.map((cq, idx) => ({
               id: cq.i || (idx + 1),
@@ -277,6 +363,7 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
               questions: data.questions,
               subject: data.subject,
               grade: data.grade,
+              teacherId: data.teacherId,
               isSharedLink: true
             };
           }
@@ -298,4 +385,24 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
     isError: true,
     errorMessage: '⚠️ Liên kết bài tập không hợp lệ hoặc đã hết hạn. Vui lòng kiểm tra lại liên kết do giáo viên cung cấp.'
   };
+}
+
+/**
+ * Shorten URL utility
+ */
+export async function shortenUrl(url: string): Promise<string> {
+  try {
+    const res = await fetch('/api/shorten-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.shortUrl || '';
+    }
+  } catch (err) {
+    console.warn("Shorten URL failed", err);
+  }
+  return '';
 }

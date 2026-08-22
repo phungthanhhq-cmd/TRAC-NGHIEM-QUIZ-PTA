@@ -2,8 +2,13 @@ import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { QuizConfig, QuizQuestion } from "../types";
 import { extractTextFromDocx } from "../utils/fileProcessor";
 
-export const DEFAULT_MODEL = "gemini-3.6-flash";
-export const CANDIDATE_MODELS = ["gemini-3.6-flash", "gemini-flash-latest"];
+export const DEFAULT_MODEL = "gemini-3.7-flash";
+export const CANDIDATE_MODELS = [
+  "gemini-3.7-flash",
+  "gemini-flash-latest",
+  "gemini-3.1-flash-lite",
+  "gemini-2.5-flash"
+];
 
 const SYSTEM_INSTRUCTION = `
 Bạn là một giáo viên chuyên gia của Việt Nam, am hiểu sâu sắc Chương trình Giáo dục Phổ thông 2018 (GDPT 2018).
@@ -38,25 +43,27 @@ export const getActiveUserApiKey = (): string => {
 };
 
 /**
- * Tests Gemini API Connection with user provided key.
+ * Checks server status and whether a system API key is configured.
  */
-export const testGeminiConnection = async (apiKey: string): Promise<{ success: boolean; message: string; model?: string }> => {
-  const trimmed = apiKey?.trim();
-  if (!trimmed) {
-    return {
-      success: false,
-      message: "🔑 Bạn chưa kết nối Gemini API. Vui lòng nhập API Key của bạn trước khi tạo câu hỏi."
-    };
+export const checkServerApiStatus = async (): Promise<{ status: string; hasServerKey: boolean; defaultModel: string }> => {
+  try {
+    const res = await fetch('/api/status');
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (e) {
+    // ignore
   }
+  return { status: 'offline', hasServerKey: false, defaultModel: DEFAULT_MODEL };
+};
 
-  if (trimmed.length < 10) {
-    return {
-      success: false,
-      message: "⚠️ API Key hoặc yêu cầu gửi đến Gemini chưa hợp lệ. Vui lòng kiểm tra lại API Key và cấu hình model."
-    };
-  }
+/**
+ * Tests Gemini API Connection with user provided key or server key.
+ */
+export const testGeminiConnection = async (apiKey?: string): Promise<{ success: boolean; message: string; model?: string }> => {
+  const trimmed = apiKey?.trim() || '';
 
-  // 1. Try testing via backend API route first
+  // Try testing via backend API route
   try {
     const res = await fetch('/api/test-key', {
       method: 'POST',
@@ -69,41 +76,38 @@ export const testGeminiConnection = async (apiKey: string): Promise<{ success: b
       return data;
     }
   } catch (apiErr) {
-    console.warn("Server API key test unavailable, falling back to direct client call...", apiErr);
+    console.warn("Server API key test unavailable, trying client-side test...", apiErr);
   }
 
-  // 2. Direct client fallback using GoogleGenAI SDK
+  if (!trimmed) {
+    return {
+      success: false,
+      message: "🔑 Chưa cấu hình API Key. Vui lòng nhập mã API Key của bạn."
+    };
+  }
+
+  // Direct client test fallback
   let lastErr: any = null;
   for (const targetModel of CANDIDATE_MODELS) {
     try {
-      const ai = new GoogleGenAI({ 
-        apiKey: trimmed,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build-byok',
-          }
-        }
-      });
+      const ai = new GoogleGenAI({ apiKey: trimmed });
 
       const response = await ai.models.generateContent({
         model: targetModel,
-        contents: "Xin chào, phản hồi ngắn gọn 'OK'.",
-        config: {
-          temperature: 0.1,
-        }
+        contents: "Xin chào, hãy phản hồi 'OK'.",
+        config: { temperature: 0.1 }
       });
 
       if (response && response.text) {
         return {
           success: true,
-          message: "🟢 Gemini API: Đã kết nối thành công!",
-          model: targetModel === "gemini-3.6-flash" ? "Gemini 3.6 Flash" : targetModel
+          message: "🟢 Gemini API: Đã kết nối thành công và sẵn sàng tạo câu hỏi!",
+          model: targetModel
         };
       }
     } catch (err: any) {
       lastErr = err;
       const errStr = String(err?.message || err);
-      // If 404 or NOT_FOUND, try next candidate model
       if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
         continue;
       }
@@ -116,28 +120,14 @@ export const testGeminiConnection = async (apiKey: string): Promise<{ success: b
   if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED')) {
     return {
       success: false,
-      message: "⚠️ API Key của bạn đang đạt giới hạn sử dụng tạm thời.\n\nVui lòng:\n• Chờ một lúc rồi thử lại;\n• Kiểm tra hạn mức Gemini API;\n• Hoặc sử dụng API Key khác.\n\nChi tiết lỗi từ Google: " + errStr
+      message: "⚠️ API Key của bạn đang đạt giới hạn sử dụng tạm thời. Vui lòng chờ vài giây rồi thử lại."
     };
   }
 
   if (errStr.includes('401') || errStr.includes('403') || errStr.includes('PERMISSION_DENIED') || errStr.includes('denied access')) {
     return {
       success: false,
-      message: "🔐 API Key không có quyền sử dụng Gemini API hoặc Dự án bị từ chối truy cập (Permission Denied).\n\nChi tiết lỗi từ Google: " + errStr + "\n\nNguyên nhân & Cách khắc phục nhanh:\n1. 🌐 API Key bị cài rào cản tên miền (HTTP Referrer): Hãy vào console.cloud.google.com/apis/credentials -> Bấm vào API Key -> Mục 'Application restrictions' chọn 'None' (hoặc thêm domain Vercel của bạn).\n2. 🔑 Mã API Key được tạo từ Google Cloud thay vì AI Studio: Hãy vào aistudio.google.com/app/apikey -> Bấm 'Create API key in new project' để tạo mã mới hoàn toàn miễn phí.\n3. ⚠️ Dự án Google Cloud cũ bị khóa/giới hạn: Tạo 1 API key mới trong dự án mới tại Google AI Studio."
-    };
-  }
-
-  if (errStr.includes('400') || errStr.includes('API_KEY_INVALID') || errStr.includes('API key not valid')) {
-    return {
-      success: false,
-      message: "⚠️ API Key hoặc yêu cầu gửi đến Gemini chưa hợp lệ. Vui lòng kiểm tra lại API Key và cấu hình model.\n\nChi tiết lỗi từ Google: " + errStr
-    };
-  }
-
-  if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
-    return {
-      success: false,
-      message: "⚠️ Model Gemini hiện tại không khả dụng trên API Key này.\n\nChi tiết lỗi từ Google: " + errStr
+      message: "🔐 Lỗi 403 (Permission Denied): Dự án Google Cloud của API Key này bị giới hạn quyền truy cập.\n\n💡 Cách khắc phục nhanh trong 1 phút:\n1. Mở trang aistudio.google.com/app/apikey\n2. Bấm 'Create API key' và chọn 'Create API key in new project'.\n3. Copy mã AIzaSy... mới và dán vào đây."
     };
   }
 
@@ -148,18 +138,14 @@ export const testGeminiConnection = async (apiKey: string): Promise<{ success: b
 };
 
 /**
- * Generates Quiz questions using user's BYOK Gemini Key.
+ * Generates Quiz questions using server API proxy with auto-fallback to client SDK.
  */
 export const generateQuizFromContent = async (
   files: File[],
   config: QuizConfig,
   customApiKey?: string
 ): Promise<QuizQuestion[]> => {
-  const userApiKey = (customApiKey || getActiveUserApiKey()).trim();
-
-  if (!userApiKey) {
-    throw new Error("🔑 Bạn chưa kết nối Gemini API.\n\nVui lòng nhập API Key của bạn trước khi tạo câu hỏi.");
-  }
+  const userApiKey = (customApiKey !== undefined ? customApiKey : getActiveUserApiKey()).trim();
 
   const optionCount = config.optionCount || 4;
   const optionKeys = Array.from({ length: optionCount }, (_, i) => String.fromCharCode(65 + i));
@@ -217,7 +203,7 @@ export const generateQuizFromContent = async (
     Trả về kết quả dưới dạng JSON thuần túy.
   `;
 
-  // Try calling server-side API proxy route first (passing userApiKey)
+  // 1. Primary path: Server-side API proxy route (handles user key + server key fallback securely)
   try {
     const res = await fetch('/api/generate-quiz', {
       method: 'POST',
@@ -243,19 +229,18 @@ export const generateQuizFromContent = async (
       }
     }
   } catch (apiErr: any) {
-    if (apiErr?.message) throw apiErr;
-    console.warn("Server API proxy unavailable, using client SDK...", apiErr);
+    if (apiErr?.message && !apiErr.message.includes('Failed to fetch')) {
+      throw apiErr;
+    }
+    console.warn("Server API proxy unreachable, attempting client-side fallback...", apiErr);
   }
 
-  // Fallback: Direct Client-Side GoogleGenAI call using user's key
-  const ai = new GoogleGenAI({ 
-    apiKey: userApiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build-byok',
-      }
-    }
-  });
+  // 2. Client-side SDK fallback if user has entered an API key
+  if (!userApiKey) {
+    throw new Error("🔑 Bạn chưa kết nối Gemini API.\n\nVui lòng mở mục 'Cấu hình Gemini API' và nhập API Key của bạn để tiếp tục.");
+  }
+
+  const ai = new GoogleGenAI({ apiKey: userApiKey });
 
   const dynamicQuizSchema: Schema = {
     type: Type.ARRAY,
@@ -332,7 +317,6 @@ export const generateQuizFromContent = async (
     }
   };
 
-  // Call CANDIDATE_MODELS with fallback and retry for rate limits
   let responseText: string | undefined;
   let lastClientError: any = null;
 
@@ -355,10 +339,8 @@ export const generateQuizFromContent = async (
     } catch (err: any) {
       lastClientError = err;
       const errStr = String(err?.message || err);
-      // Single retry with 2000ms delay if rate limited / transient error
       if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('500') || errStr.includes('503')) {
-        console.warn("Client hit rate limit/error. Single retry in 2000ms...");
-        await new Promise(res => setTimeout(res, 2000));
+        await new Promise(res => setTimeout(res, 1500));
         try {
           const responseRetry = await ai.models.generateContent({
             model: targetModel,
@@ -374,11 +356,10 @@ export const generateQuizFromContent = async (
           });
           responseText = responseRetry.text;
           if (responseText) break;
-        } catch (retryErr: any) {
+        } catch (retryErr) {
           lastClientError = retryErr;
         }
       } else if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
-        // Try next candidate model
         continue;
       } else {
         break;
@@ -392,21 +373,18 @@ export const generateQuizFromContent = async (
 
   const rawErrStr = typeof lastClientError === 'string' ? lastClientError : (lastClientError?.message || JSON.stringify(lastClientError || {}));
 
-  if (rawErrStr.includes('429') || rawErrStr.includes('RESOURCE_EXHAUSTED')) {
-    throw new Error("⚠️ API Key của bạn đang đạt giới hạn sử dụng tạm thời.\n\nVui lòng:\n• Chờ một lúc rồi thử lại;\n• Kiểm tra hạn mức Gemini API;\n• Hoặc sử dụng API Key khác.");
+  if (rawErrStr.includes('401') || rawErrStr.includes('403') || rawErrStr.includes('PERMISSION_DENIED') || rawErrStr.includes('denied access')) {
+    throw new Error("🔐 Lỗi 403 (Permission Denied): Dự án Google Cloud của API Key này bị từ chối truy cập.\n\n💡 Cách khắc phục nhanh:\nVui lòng tạo 1 API Key mới tại aistudio.google.com/app/apikey (chọn 'Create API key in new project') và dán vào mục Cấu hình.");
   }
 
-  if (rawErrStr.includes('401') || rawErrStr.includes('403') || rawErrStr.includes('PERMISSION_DENIED') || rawErrStr.includes('denied access')) {
-    throw new Error("🔐 API Key không có quyền sử dụng Gemini API hoặc đã bị vô hiệu hóa.");
+  if (rawErrStr.includes('429') || rawErrStr.includes('RESOURCE_EXHAUSTED')) {
+    throw new Error("⚠️ Hạn mức API đang tạm thời bận. Vui lòng chờ 10-20 giây rồi thử lại.");
   }
 
   if (rawErrStr.includes('400') || rawErrStr.includes('API_KEY_INVALID') || rawErrStr.includes('API key not valid')) {
-    throw new Error("⚠️ API Key hoặc yêu cầu gửi đến Gemini chưa hợp lệ. Vui lòng kiểm tra lại API Key và cấu hình model.");
-  }
-
-  if (rawErrStr.includes('404') || rawErrStr.includes('NOT_FOUND')) {
-    throw new Error("⚠️ Model Gemini hiện tại không khả dụng hoặc cấu hình API chưa đúng.");
+    throw new Error("⚠️ API Key không hợp lệ. Vui lòng kiểm tra lại chuỗi mã API Key.");
   }
 
   throw new Error(`Không thể tạo câu hỏi từ Gemini AI: ${rawErrStr}`);
 };
+

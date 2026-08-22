@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { QuizQuestion } from '../types';
 import MathRenderer from './MathRenderer';
-import { CheckCircle2, XCircle, Clock, Award, RotateCcw, ArrowLeft, Send, Sparkles, AlertCircle } from 'lucide-react';
+import { CheckCircle2, XCircle, Clock, Award, RotateCcw, ArrowLeft, Send, Sparkles, AlertCircle, ShieldCheck, UserCheck } from 'lucide-react';
 
 interface StudentQuizViewProps {
   title: string;
   questions: QuizQuestion[];
   subject?: string;
   grade?: string;
+  teacherId?: string;
+  teacherEmail?: string;
   isSharedLink?: boolean;
   isError?: boolean;
   errorMessage?: string;
@@ -19,18 +21,26 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
   questions,
   subject,
   grade,
+  teacherId,
+  teacherEmail,
   isSharedLink = false,
   isError = false,
   errorMessage,
   onExitStudentMode
 }) => {
-  const [studentName, setStudentName] = useState('');
-  const [studentClass, setStudentClass] = useState('');
+  const [studentName, setStudentName] = useState(() => {
+    return localStorage.getItem('last_student_name') || '';
+  });
+  const [studentClass, setStudentClass] = useState(() => {
+    return localStorage.getItem('last_student_class') || '';
+  });
   const [userAnswers, setUserAnswers] = useState<Record<number, string>>({});
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [isTimerRunning, setIsTimerRunning] = useState(true);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [submissionStatus, setSubmissionStatus] = useState<'idle' | 'submitting' | 'success' | 'failed'>('idle');
+  const [attemptCount, setAttemptCount] = useState<number>(1);
 
   // Stopwatch timer
   useEffect(() => {
@@ -60,11 +70,77 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
   const answeredCount = Object.keys(userAnswers).length;
   const totalCount = questions.length;
 
-  const handleSubmit = () => {
+  // Calculate score
+  const correctCount = questions.reduce((acc, q) => {
+    const studentAns = userAnswers[q.id];
+    if (studentAns && studentAns.toUpperCase() === q.correct_answer.toUpperCase()) {
+      return acc + 1;
+    }
+    return acc;
+  }, 0);
+
+  const score10 = Math.round((correctCount / (totalCount || 1)) * 10 * 10) / 10;
+
+  const handleSubmit = async () => {
     setIsSubmitted(true);
     setIsTimerRunning(false);
     setShowConfirmModal(false);
+    setSubmissionStatus('submitting');
     window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    // Save name & class in local memory for convenience
+    if (studentName.trim()) localStorage.setItem('last_student_name', studentName.trim());
+    if (studentClass.trim()) localStorage.setItem('last_student_class', studentClass.trim());
+
+    // Send submission to teacher dashboard
+    try {
+      const answersDetails = questions.map(q => {
+        const chosen = userAnswers[q.id] || '';
+        const correct = (q.correct_answer || 'A').toUpperCase();
+        return {
+          questionId: q.id,
+          question: q.question_content,
+          selectedAnswer: chosen || 'Chưa trả lời',
+          correctAnswer: correct,
+          isCorrect: chosen.toUpperCase() === correct,
+          explanation: q.explanation || ''
+        };
+      });
+
+      const payload = {
+        teacherId: teacherId || 'tea_default',
+        teacherEmail: teacherEmail || undefined,
+        quizTitle: title,
+        subject,
+        grade,
+        studentName: studentName.trim() || 'Học sinh',
+        studentClass: studentClass.trim(),
+        score: score10,
+        correctCount,
+        totalCount,
+        timeSpentSeconds: elapsedSeconds,
+        answersDetails
+      };
+
+      const res = await fetch('/api/submit-quiz', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setSubmissionStatus('success');
+        if (data.attemptNumber) {
+          setAttemptCount(data.attemptNumber);
+        }
+      } else {
+        setSubmissionStatus('failed');
+      }
+    } catch (err) {
+      console.warn('Could not send submission to server', err);
+      setSubmissionStatus('failed');
+    }
   };
 
   const handleRetake = () => {
@@ -72,6 +148,7 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
     setIsSubmitted(false);
     setElapsedSeconds(0);
     setIsTimerRunning(true);
+    setSubmissionStatus('idle');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -101,17 +178,6 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
       </div>
     );
   }
-
-  // Calculate score
-  const correctCount = questions.reduce((acc, q) => {
-    const studentAns = userAnswers[q.id];
-    if (studentAns && studentAns.toUpperCase() === q.correct_answer.toUpperCase()) {
-      return acc + 1;
-    }
-    return acc;
-  }, 0);
-
-  const score10 = Math.round((correctCount / totalCount) * 10 * 10) / 10;
 
   const getEvaluation = (score: number) => {
     if (score >= 9) return { label: 'Xuất sắc!', color: 'text-emerald-600 bg-emerald-50 border-emerald-200' };
@@ -175,23 +241,27 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
         {!isSubmitted && (
           <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">Họ và tên học sinh (không bắt buộc):</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Họ và tên học sinh <span className="text-rose-500">*</span>:
+              </label>
               <input
                 type="text"
                 value={studentName}
                 onChange={(e) => setStudentName(e.target.value)}
                 placeholder="Ví dụ: Nguyễn Văn A"
-                className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none bg-slate-50/50"
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">Lớp / Trường:</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Lớp / Trường:
+              </label>
               <input
                 type="text"
                 value={studentClass}
                 onChange={(e) => setStudentClass(e.target.value)}
-                placeholder="Ví dụ: 12A1"
-                className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                placeholder="Ví dụ: 12A1 - THPT Chuyên"
+                className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none bg-slate-50/50"
               />
             </div>
           </div>
@@ -200,6 +270,29 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
         {/* Result Summary Card (When submitted) */}
         {isSubmitted && (
           <div className="bg-white rounded-2xl p-6 shadow-lg border border-slate-200 animate-in fade-in slide-in-from-top-4">
+            
+            {/* Automatic reporting status pill */}
+            <div className="mb-4 flex justify-center">
+              {submissionStatus === 'submitting' && (
+                <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                  <div className="w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                  <span>Đang gửi kết quả về cho Giáo viên...</span>
+                </div>
+              )}
+              {submissionStatus === 'success' && (
+                <div className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 shadow-xs">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>Đã ghi nhận vào bảng điểm của Giáo viên (Lần {attemptCount})</span>
+                </div>
+              )}
+              {submissionStatus === 'failed' && (
+                <div className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">
+                  <CheckCircle2 className="w-4 h-4 text-slate-500" />
+                  <span>Đã hoàn thành bài làm (Offline/Đã lưu cục bộ)</span>
+                </div>
+              )}
+            </div>
+
             <div className="text-center space-y-3 border-b border-slate-100 pb-6">
               <div className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full font-bold text-sm border ${evalInfo.color}`}>
                 <Award className="w-4 h-4" />

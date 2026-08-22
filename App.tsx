@@ -7,9 +7,10 @@ import HistoryModal from './components/HistoryModal';
 import ShareModal from './components/ShareModal';
 import ApiKeyModal, { getUserApiKey } from './components/ApiKeyModal';
 import StudentQuizView from './components/StudentQuizView';
-import { generateQuizFromContent } from './services/geminiService';
-import { decodeQuizFromUrl, SharedQuizPackage } from './utils/shareUtils';
-import { Download, History, BrainCircuit, Copy, Check, Share2, Key, RefreshCw } from 'lucide-react';
+import StudentSubmissionsModal from './components/StudentSubmissionsModal';
+import { generateQuizFromContent, checkServerApiStatus } from './services/geminiService';
+import { decodeQuizFromUrl, SharedQuizPackage, getTeacherId, getTeacherEmail } from './utils/shareUtils';
+import { Download, History, BrainCircuit, Copy, Check, Share2, Key, RefreshCw, GraduationCap, Users } from 'lucide-react';
 
 const App: React.FC = () => {
   // --- State ---
@@ -31,10 +32,13 @@ const App: React.FC = () => {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [isCopied, setIsCopied] = useState(false);
   
-  // New state for modals and student mode
+  // Modals and student mode
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
+  const [isSubmissionsModalOpen, setIsSubmissionsModalOpen] = useState(false);
+  const [submissionCount, setSubmissionCount] = useState<number>(0);
+  const [hasServerKey, setHasServerKey] = useState<boolean>(false);
   const [studentQuizPackage, setStudentQuizPackage] = useState<SharedQuizPackage | null>(null);
   const [isLoadingQuiz, setIsLoadingQuiz] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
@@ -74,8 +78,34 @@ const App: React.FC = () => {
       }
     }
 
+    // Check server status and API readiness
+    checkServerApiStatus().then(status => {
+      if (status && status.hasServerKey) {
+        setHasServerKey(true);
+      }
+    });
+
+    // Check student submissions count for this teacher
+    const checkSubmissions = async () => {
+      try {
+        const teacherId = getTeacherId();
+        const teacherEmail = getTeacherEmail();
+        const res = await fetch(`/api/teacher-submissions?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(teacherEmail)}`);
+        if (res.ok) {
+          const data = await res.json();
+          setSubmissionCount((data.submissions || []).length);
+        }
+      } catch (e) {
+        // silent fail
+      }
+    };
+
+    checkSubmissions();
+    const interval = setInterval(checkSubmissions, 15000);
+
     return () => {
       window.removeEventListener('hashchange', handleHashChange);
+      clearInterval(interval);
     };
   }, []);
 
@@ -84,8 +114,8 @@ const App: React.FC = () => {
     if (files.length === 0 && !config.sourceText?.trim() && !config.lessonName?.trim()) return;
 
     const userKey = getUserApiKey();
-    if (!userKey || !userKey.trim()) {
-      setError("🔑 Bạn chưa kết nối Gemini API.\n\nVui lòng nhập API Key của bạn trước khi tạo câu hỏi.");
+    if (!userKey && !hasServerKey) {
+      setError("🔑 Bạn chưa kết nối Gemini API.\n\nVui lòng mở mục 'Cấu hình Gemini API' và nhập API Key của bạn để bắt đầu tạo câu hỏi.");
       setIsApiKeyModalOpen(true);
       return;
     }
@@ -120,8 +150,11 @@ const App: React.FC = () => {
       localStorage.setItem('quizHistory', JSON.stringify(newHistory));
 
     } catch (err: any) {
-      const errMsg = err.message || "Đã xảy ra lỗi không xác định.";
+      const errMsg = err.message || "Đã xảy ra lỗi không xác định khi tạo câu hỏi.";
       setError(errMsg);
+      if (errMsg.includes('403') || errMsg.includes('PERMISSION_DENIED') || errMsg.includes('chưa kết nối')) {
+        setIsApiKeyModalOpen(true);
+      }
     } finally {
       setIsGenerating(false);
     }
@@ -209,7 +242,9 @@ const App: React.FC = () => {
       title,
       questions: generatedQuiz,
       subject: config.subject,
-      grade: config.grade
+      grade: config.grade,
+      teacherId: getTeacherId(),
+      teacherEmail: getTeacherEmail()
     });
   };
 
@@ -230,6 +265,8 @@ const App: React.FC = () => {
         questions={studentQuizPackage.questions}
         subject={studentQuizPackage.subject}
         grade={studentQuizPackage.grade}
+        teacherId={studentQuizPackage.teacherId}
+        teacherEmail={studentQuizPackage.teacherEmail}
         isSharedLink={studentQuizPackage.isSharedLink}
         isError={studentQuizPackage.isError}
         errorMessage={studentQuizPackage.errorMessage}
@@ -241,7 +278,7 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen flex flex-col font-sans text-slate-800">
       
-      {/* Header - Increased Opacity */}
+      {/* Header */}
       <header className="bg-white/90 backdrop-blur-md border-b border-white/40 sticky top-0 z-30 shadow-sm">
         <div className="max-w-[1600px] mx-auto px-4 h-16 flex justify-between items-center">
             <div className="flex items-center gap-3">
@@ -255,22 +292,44 @@ const App: React.FC = () => {
               <button 
                 onClick={() => setIsApiKeyModalOpen(true)}
                 className={`flex items-center gap-2 px-3.5 py-2 rounded-xl font-bold transition-all text-xs shadow-xs active:scale-95 border ${
-                  getUserApiKey() 
+                  getUserApiKey() || hasServerKey
                     ? 'bg-emerald-50 hover:bg-emerald-100/90 text-emerald-900 border-emerald-300/80' 
                     : 'bg-amber-50 hover:bg-amber-100/90 text-amber-900 border-amber-300/80 animate-pulse'
                 }`}
-                title="Cấu hình API Key Gemini cá nhân"
+                title="Cấu hình API Key Gemini"
               >
-                <Key className={`w-4 h-4 ${getUserApiKey() ? 'text-emerald-600' : 'text-amber-600'}`} />
-                <span>{getUserApiKey() ? '🟢 Gemini API: Đã kết nối' : '🔑 Cấu hình Gemini API'}</span>
+                <Key className={`w-4 h-4 ${getUserApiKey() || hasServerKey ? 'text-emerald-600' : 'text-amber-600'}`} />
+                <span>
+                  {getUserApiKey() 
+                    ? '🟢 Gemini API: Key cá nhân' 
+                    : hasServerKey 
+                      ? '🟢 Gemini API: Sẵn sàng' 
+                      : '🔑 Cấu hình Gemini API'}
+                </span>
+              </button>
+
+              <button 
+                onClick={() => setIsSubmissionsModalOpen(true)}
+                className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-blue-50 hover:bg-blue-100/90 text-blue-900 font-bold transition-all border border-blue-300/80 shadow-xs active:scale-95 text-xs"
+                title="Xem lịch sử làm bài và kết quả của tất cả học sinh"
+              >
+                <GraduationCap className="w-4 h-4 text-blue-600" />
+                <span className="hidden sm:inline">Lịch sử làm bài (HS)</span>
+                <span className="sm:hidden">Bài làm HS</span>
+                {submissionCount > 0 && (
+                  <span className="bg-blue-600 text-white text-[11px] px-2 py-0.5 rounded-full font-bold shadow-xs">
+                    {submissionCount}
+                  </span>
+                )}
               </button>
 
               <button 
                 onClick={() => setIsHistoryModalOpen(true)}
                 className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white/70 hover:bg-white/90 text-slate-800 font-semibold transition-colors border border-white/50 shadow-sm active:scale-95 backdrop-blur-sm text-xs"
+                title="Xem lịch sử các bộ đề bạn đã tạo"
               >
                 <History className="w-4 h-4" />
-                <span className="hidden sm:inline">Lịch sử</span>
+                <span className="hidden sm:inline">Lịch sử tạo đề</span>
                 {history.length > 0 && (
                   <span className="bg-slate-200/80 text-slate-700 text-xs px-2 py-0.5 rounded-full font-bold shadow-inner">
                     {history.length}
@@ -296,7 +355,7 @@ const App: React.FC = () => {
                 />
             </div>
 
-            {/* Right Panel: Results - Increased Opacity */}
+            {/* Right Panel: Results */}
             <div className="flex-1 h-full flex flex-col bg-white/85 backdrop-blur-xl rounded-2xl shadow-xl border border-white/60 overflow-hidden relative">
                 
                 {/* Result Header */}
@@ -315,6 +374,12 @@ const App: React.FC = () => {
                                 className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-all shadow-lg shadow-purple-500/30 font-medium text-sm active:scale-95"
                             >
                                 <Share2 className="w-4 h-4" /> Link làm bài cho HS
+                            </button>
+                            <button 
+                                onClick={() => setIsSubmissionsModalOpen(true)}
+                                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-all shadow-lg shadow-blue-500/30 font-medium text-sm active:scale-95"
+                            >
+                                <GraduationCap className="w-4 h-4" /> Bảng điểm HS {submissionCount > 0 ? `(${submissionCount})` : ''}
                             </button>
                             <button 
                                 onClick={handleCopyJSON}
@@ -391,7 +456,7 @@ const App: React.FC = () => {
                         <div className="max-w-4xl mx-auto pb-10 space-y-6">
                             {generatedQuiz.map((q, idx) => (
                                 <QuizCard 
-                                    key={q.id} // Use ID instead of index for safer deletion rendering
+                                    key={q.id}
                                     question={q} 
                                     index={idx} 
                                     onDelete={handleDeleteQuestion}
@@ -420,6 +485,11 @@ const App: React.FC = () => {
         grade={config.grade}
         lessonName={config.lessonName}
         onOpenStudentView={openStudentPreview}
+      />
+
+      <StudentSubmissionsModal
+        isOpen={isSubmissionsModalOpen}
+        onClose={() => setIsSubmissionsModalOpen(false)}
       />
 
       <ApiKeyModal

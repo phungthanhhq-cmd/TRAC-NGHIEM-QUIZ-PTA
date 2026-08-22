@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { QuizQuestion } from '../types';
-import { createSelfContainedQuizUrl } from '../utils/shareUtils';
+import { createSelfContainedQuizUrl, getTeacherEmail, setTeacherEmail } from '../utils/shareUtils';
 import { QRCodeSVG } from 'qrcode.react';
 import { 
   Share2, 
@@ -20,7 +20,9 @@ import {
   ShieldCheck,
   Globe,
   Settings2,
-  Info
+  Info,
+  Mail,
+  Edit3
 } from 'lucide-react';
 
 interface ShareModalProps {
@@ -47,10 +49,28 @@ const ShareModal: React.FC<ShareModalProps> = ({
   const [isFullScreenQR, setIsFullScreenQR] = useState<boolean>(false);
   const [customDomain, setCustomDomain] = useState<string>('');
   const [showDomainEdit, setShowDomainEdit] = useState<boolean>(false);
+  const [teacherEmail, setTeacherEmailState] = useState<string>(() => getTeacherEmail());
+  const [isEditingEmail, setIsEditingEmail] = useState<boolean>(false);
+  const [emailInput, setEmailInput] = useState<string>('');
 
   const quizTitle = lessonName?.trim()
     ? `${subject || 'Môn học'} Lớp ${grade || ''}: ${lessonName.trim()}`
     : `Bài tập ôn tập ${subject || ''} Lớp ${grade || ''}`;
+
+  const regenerateUrl = (domain?: string, email?: string) => {
+    const targetDomain = domain || customDomain;
+    const targetEmail = email || teacherEmail;
+    const generatedUrl = createSelfContainedQuizUrl(
+      quizTitle,
+      questions,
+      subject,
+      grade,
+      targetDomain,
+      undefined,
+      targetEmail
+    );
+    setShareUrl(generatedUrl);
+  };
 
   useEffect(() => {
     if (isOpen && questions && questions.length > 0) {
@@ -61,17 +81,31 @@ const ShareModal: React.FC<ShareModalProps> = ({
       }
 
       setCustomDomain(baseOrigin);
+      const currentEmail = getTeacherEmail();
+      setTeacherEmailState(currentEmail);
 
       const generatedUrl = createSelfContainedQuizUrl(
         quizTitle,
         questions,
         subject,
         grade,
-        baseOrigin
+        baseOrigin,
+        undefined,
+        currentEmail
       );
       setShareUrl(generatedUrl);
     }
   }, [isOpen, quizTitle, questions, subject, grade]);
+
+  const handleSaveEmail = () => {
+    const clean = emailInput.trim().toLowerCase();
+    if (clean) {
+      setTeacherEmail(clean);
+      setTeacherEmailState(clean);
+      setIsEditingEmail(false);
+      regenerateUrl(undefined, clean);
+    }
+  };
 
   // If teacher changes their domain (e.g. typing their Vercel domain: https://trac-nghiem-pta.vercel.app)
   const handleDomainUpdate = (newDomain: string) => {
@@ -80,14 +114,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
       clean = 'https://' + clean;
     }
     setCustomDomain(clean);
-    const updatedUrl = createSelfContainedQuizUrl(
-      quizTitle,
-      questions,
-      subject,
-      grade,
-      clean
-    );
-    setShareUrl(updatedUrl);
+    regenerateUrl(clean, undefined);
   };
 
   if (!isOpen || !questions || questions.length === 0) return null;
@@ -237,6 +264,57 @@ const ShareModal: React.FC<ShareModalProps> = ({
             <span className="bg-emerald-600 text-white font-bold px-3 py-1 rounded-full text-[11px] flex items-center gap-1 shrink-0 shadow-xs">
               <ShieldCheck className="w-3.5 h-3.5" /> Chuẩn Zalo & Web
             </span>
+          </div>
+
+          {/* Teacher Gmail Sync Badge */}
+          <div className="p-3 bg-indigo-50/70 border border-indigo-200 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
+                <Mail className="w-4 h-4" />
+              </div>
+              <div>
+                <p className="font-bold text-indigo-950">
+                  Tài khoản nhận bài của Giáo viên: <span className="text-indigo-600 font-mono underline">{teacherEmail}</span>
+                </p>
+                <p className="text-[11px] text-indigo-700">
+                  Học sinh nộp bài ở link sẽ tự động đồng bộ kết quả vào Bảng điểm Gmail này của bạn
+                </p>
+              </div>
+            </div>
+
+            {isEditingEmail ? (
+              <div className="flex items-center gap-1.5 mt-1 sm:mt-0">
+                <input
+                  type="email"
+                  placeholder="gmail-cua-ban@gmail.com"
+                  value={emailInput}
+                  onChange={(e) => setEmailInput(e.target.value)}
+                  className="px-2.5 py-1 text-xs border border-indigo-300 rounded-lg bg-white outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+                <button
+                  onClick={handleSaveEmail}
+                  className="px-2.5 py-1 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 text-xs"
+                >
+                  Lưu
+                </button>
+                <button
+                  onClick={() => setIsEditingEmail(false)}
+                  className="px-2 py-1 border border-slate-300 text-slate-600 rounded-lg text-xs"
+                >
+                  Hủy
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  setEmailInput(teacherEmail);
+                  setIsEditingEmail(true);
+                }}
+                className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 shrink-0 self-end sm:self-center bg-white px-2 py-1 rounded-lg border border-indigo-200 hover:border-indigo-300"
+              >
+                <Edit3 className="w-3 h-3" /> Đổi Gmail
+              </button>
+            )}
           </div>
 
           {/* DUAL OPTIONS: DIRECT LINK & QR CODE */}

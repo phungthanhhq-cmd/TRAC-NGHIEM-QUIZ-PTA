@@ -196,8 +196,8 @@ const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onClose, onKeySaved }
                   <strong className="text-slate-800">{maskApiKey(currentKey)}</strong>
                 </div>
                 <div className="text-xs text-slate-600">
-                  <span className="font-medium text-slate-500">Model mặc định: </span>
-                  <strong className="text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-mono">Gemini 3.6 Flash</strong>
+                  <span className="font-medium text-slate-500">Model Gemini: </span>
+                  <strong className="text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-mono">Gemini 3.7 Flash</strong>
                 </div>
               </div>
 
@@ -227,10 +227,10 @@ const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onClose, onKeySaved }
         <div className="p-3.5 bg-blue-50/80 border border-blue-200/80 rounded-2xl text-xs text-blue-900 space-y-1">
           <div className="flex items-center gap-2 font-bold text-blue-800">
             <ShieldCheck className="w-4 h-4 text-blue-600 flex-shrink-0" />
-            <span>Cam kết Bảo mật BYOK (Bring Your Own Key):</span>
+            <span>Cam kết Tương thích & Bảo mật BYOK (Bring Your Own Key):</span>
           </div>
           <p className="leading-relaxed text-blue-800/90 text-[11px]">
-            API Key này thuộc tài khoản của bạn và quota sử dụng do Google quản lý. Ứng dụng không sử dụng API Key của người tạo app, không gửi key về server database, không lưu vào source code hay môi trường dùng chung.
+            Hệ thống hỗ trợ tất cả các thiết bị, máy tính và cấu hình. API Key của bạn được lưu an toàn tại trình duyệt cục bộ và chỉ dùng để tạo câu hỏi trực tiếp với Google Gemini AI.
           </p>
         </div>
 
@@ -307,17 +307,17 @@ const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onClose, onKeySaved }
             </div>
             
             <ol className="list-decimal list-inside text-xs text-slate-700 space-y-1.5 pt-1 font-medium">
-              <li><strong>Bước 1:</strong> Đăng nhập tài khoản Google của bạn tại Google AI Studio.</li>
-              <li><strong>Bước 2:</strong> Mở mục <strong>API Keys</strong> ở menu bên trái.</li>
-              <li><strong>Bước 3:</strong> Bấm <strong>"Create API key"</strong> để tạo mới API Key cho Project của bạn.</li>
-              <li><strong>Bước 4:</strong> Sao chép chuỗi mã API Key được tạo (bắt đầu bằng <code>AIzaSy...</code>).</li>
-              <li><strong>Bước 5:</strong> Quay lại ứng dụng AI QUIZ-PTA và dán mã API Key vào ô ở trên.</li>
-              <li><strong>Bước 6:</strong> Bấm <strong>"Kết nối API"</strong> để hoàn tất thiết lập.</li>
+              <li><strong>Bước 1:</strong> Đăng nhập tài khoản Google của bạn tại <strong>Google AI Studio</strong> (aistudio.google.com/app/apikey).</li>
+              <li><strong>Bước 2:</strong> Bấm nút màu xanh <strong>"Create API key"</strong>.</li>
+              <li><strong>Bước 3:</strong> Chọn <strong>"Create API key in new project"</strong> (Tạo trong dự án mới để không bị giới hạn quyền 403).</li>
+              <li><strong>Bước 4:</strong> Sao chép chuỗi mã API Key (dạng <code>AIzaSy...</code>).</li>
+              <li><strong>Bước 5:</strong> Quay lại ứng dụng và dán mã vào ô nhập bên trên.</li>
+              <li><strong>Bước 6:</strong> Bấm nút <strong>"Kết nối API"</strong> để hoàn tất và bắt đầu tạo câu hỏi.</li>
             </ol>
 
             <div className="p-2.5 bg-amber-50 border border-amber-200/80 rounded-xl text-[11px] text-amber-900 font-medium flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
-              <span><strong>Cảnh báo bảo mật:</strong> Không chia sẻ API Key của bạn với người khác.</span>
+              <span><strong>Lưu ý:</strong> API Key tạo từ Google AI Studio là hoàn toàn miễn phí và không yêu cầu thẻ tín dụng.</span>
             </div>
           </div>
         )}
@@ -326,9 +326,10 @@ const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onClose, onKeySaved }
         {isTesting && (
           <div className="p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs font-medium flex items-center gap-2">
             <RefreshCw className="w-4 h-4 text-amber-600 animate-spin" />
-            <span>🟡 Đang kiểm tra kết nối với Gemini API (Model: Gemini 3.6 Flash)...</span>
+            <span>🟡 Đang kiểm tra kết nối với Gemini API...</span>
           </div>
         )}
+
 
         {testResult && (
           <div className={`p-3.5 rounded-xl border text-xs leading-relaxed whitespace-pre-line font-medium ${
