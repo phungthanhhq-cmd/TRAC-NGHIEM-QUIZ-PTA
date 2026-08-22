@@ -86,11 +86,23 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     try {
       const email = getTeacherEmail();
       const res = await fetch(`/api/teacher-submissions?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(email)}`);
-      if (!res.ok) {
-        throw new Error('Không thể tải danh sách kết quả học sinh');
+      
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        if (!isBackground) {
+          console.warn('Server returned non-JSON response while fetching submissions');
+        }
+        return;
       }
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Không thể tải danh sách kết quả học sinh');
+      }
+
       const data = await res.json();
       setSubmissions(data.submissions || []);
+      setError(null);
     } catch (err: any) {
       if (!isBackground) {
         console.error('Error fetching submissions:', err);
@@ -108,7 +120,8 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     try {
       const email = getTeacherEmail();
       const res = await fetch(`/api/class-rosters?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(email)}`);
-      if (res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
         setRosters(data.rosters || []);
       }
