@@ -122,6 +122,29 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
         answersDetails
       };
 
+      // Also save locally to teacher_local_submissions as backup
+      try {
+        const localSubsRaw = localStorage.getItem('teacher_local_submissions');
+        const localSubs = localSubsRaw ? JSON.parse(localSubsRaw) : [];
+        const localItem = {
+          ...payload,
+          id: 'sub_local_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+          submittedAt: Date.now(),
+          attemptNumber: 1
+        };
+        // Count attempts in local
+        const prevLocalAttempts = localSubs.filter((s: any) => 
+          s.quizTitle === payload.quizTitle && 
+          s.studentName.toLowerCase() === payload.studentName.toLowerCase() &&
+          (payload.studentClass ? s.studentClass.toLowerCase() === payload.studentClass.toLowerCase() : true)
+        );
+        localItem.attemptNumber = prevLocalAttempts.length + 1;
+        localSubs.unshift(localItem);
+        localStorage.setItem('teacher_local_submissions', JSON.stringify(localSubs.slice(0, 100)));
+      } catch (locErr) {
+        console.warn('Could not save local submission backup', locErr);
+      }
+
       const res = await fetch('/api/submit-quiz', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

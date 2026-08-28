@@ -196,8 +196,8 @@ const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onClose, onKeySaved }
                   <strong className="text-slate-800">{maskApiKey(currentKey)}</strong>
                 </div>
                 <div className="text-xs text-slate-600">
-                  <span className="font-medium text-slate-500">Model Gemini: </span>
-                  <strong className="text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-mono">Gemini 3.7 Flash</strong>
+                  <span className="font-medium text-slate-500">Mô hình AI: </span>
+                  <strong className="text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-sans">Gemini 2.5 Flash / 3.7 Flash (Tự động chống nghẽn)</strong>
                 </div>
               </div>
 

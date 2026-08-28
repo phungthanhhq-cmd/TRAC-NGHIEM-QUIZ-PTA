@@ -5,12 +5,12 @@ import cors from 'cors';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 
-export const DEFAULT_MODEL = "gemini-3.7-flash";
+export const DEFAULT_MODEL = "gemini-2.5-flash";
 export const CANDIDATE_MODELS = [
+  "gemini-2.5-flash",
   "gemini-3.7-flash",
   "gemini-flash-latest",
-  "gemini-3.1-flash-lite",
-  "gemini-2.5-flash"
+  "gemini-3.1-flash-lite"
 ];
 
 // In-memory quiz store (maps short 6-character code to quiz package)
@@ -436,12 +436,21 @@ async function startServer() {
             if (responseText) break;
           } catch (err: any) {
             lastError = err;
-            const errStr = String(err?.message || err);
+            const errStr = String(err?.message || err || '');
             
-            // Retry on transient rate limit/server error
-            if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('500') || errStr.includes('503')) {
-              console.warn(`[Server] Rate limit/error with ${targetModel}. Retrying in 1.5s...`);
-              await new Promise(resolve => setTimeout(resolve, 1500));
+            // Check for transient server overload / rate limit / 503 / 429 / 500
+            const isTransient = errStr.includes('429') || 
+              errStr.includes('RESOURCE_EXHAUSTED') || 
+              errStr.includes('500') || 
+              errStr.includes('503') || 
+              errStr.includes('UNAVAILABLE') || 
+              errStr.includes('overloaded') ||
+              errStr.includes('high demand') ||
+              errStr.includes('Service Unavailable');
+
+            if (isTransient) {
+              console.warn(`[Server] Model ${targetModel} is busy or returned 503/429. Retrying once...`);
+              await new Promise(resolve => setTimeout(resolve, 1200));
               try {
                 const retryRes = await ai.models.generateContent({
                   model: targetModel,
@@ -457,13 +466,19 @@ async function startServer() {
                 });
                 responseText = retryRes.text;
                 if (responseText) break;
-              } catch (retryErr) {
+              } catch (retryErr: any) {
                 lastError = retryErr;
+                console.warn(`[Server] Retry on ${targetModel} failed, trying next candidate model in list...`);
+                continue; // CRITICAL: Fallback to next candidate model!
               }
             } else if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
               continue; // try next candidate model
+            } else if (errStr.includes('401') || errStr.includes('403') || errStr.includes('PERMISSION_DENIED') || errStr.includes('API_KEY_INVALID')) {
+              break; // Key has permission issue, try next key
             } else {
-              break; // break candidate models for this key if 403 / permission issue, try next key
+              // Unknown error on this model, try next candidate model
+              console.warn(`[Server] Non-fatal model error on ${targetModel}: ${errStr}. Trying next candidate model...`);
+              continue;
             }
           }
         }
@@ -474,9 +489,15 @@ async function startServer() {
       if (!responseText) {
         const rawErrStr = typeof lastError === 'string' ? lastError : (lastError?.message || JSON.stringify(lastError || {}));
         
+        if (rawErrStr.includes('503') || rawErrStr.includes('UNAVAILABLE') || rawErrStr.includes('overloaded') || rawErrStr.includes('Service Unavailable') || rawErrStr.includes('high demand')) {
+          return res.status(503).json({ 
+            error: '⚠️ Máy chủ AI Google (Gemini) đang quá tải tạm thời (503 Service Unavailable).\n\n💡 Cách xử lý:\n• Hệ thống đã tự động thử các mô hình dự phòng (Gemini 2.5 Flash, 3.7 Flash, Flash Latest) nhưng máy chủ Google đang có lượng truy cập đột biến.\n• Vui lòng bấm "Tạo câu hỏi" lại sau 5 - 10 giây;\n• Hoặc vào "Cấu hình Gemini API" đổi API Key từ một tài khoản Google khác để có hạn mức mới.' 
+          });
+        }
+
         if (rawErrStr.includes('429') || rawErrStr.includes('RESOURCE_EXHAUSTED')) {
           return res.status(429).json({ 
-            error: '⚠️ Hạn mức API Gemini đang quá tải tạm thời.\n\nVui lòng:\n• Chờ 10-20 giây rồi bấm "Thử lại ngay";\n• Hoặc vào mục "Cấu hình Gemini API" để đổi API Key khác.' 
+            error: '⚠️ Hạn mức API Gemini đang quá tải tạm thời (429 Resource Exhausted).\n\nVui lòng:\n• Chờ 10-20 giây rồi bấm "Thử lại ngay";\n• Hoặc vào mục "Cấu hình Gemini API" để đổi API Key khác.' 
           });
         }
 
@@ -657,21 +678,29 @@ async function startServer() {
           if (response && response.text) {
             return res.json({
               success: true,
-              message: "🟢 Gemini API: Đã kết nối thành công và sẵn sàng tạo câu hỏi!",
+              message: `🟢 Gemini API: Đã kết nối thành công (${targetModel}) và sẵn sàng tạo câu hỏi!`,
               model: targetModel
             });
           }
         } catch (err: any) {
           lastError = err;
           const errStr = String(err?.message || err);
-          if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
-            continue;
+          if (errStr.includes('401') || errStr.includes('403') || errStr.includes('PERMISSION_DENIED') || errStr.includes('API_KEY_INVALID')) {
+            break; // Stop testing other models if key itself is denied
           }
-          break;
+          // If 503 (overloaded) or 429 or 404, continue testing next model
+          continue;
         }
       }
 
       const errStr = String(lastError?.message || lastError || '');
+
+      if (errStr.includes('503') || errStr.includes('UNAVAILABLE') || errStr.includes('overloaded') || errStr.includes('Service Unavailable') || errStr.includes('high demand')) {
+        return res.status(503).json({
+          success: false,
+          message: "⚠️ Máy chủ AI Google (Gemini) đang quá tải tạm thời (503 Service Unavailable).\n\n💡 Vui lòng chờ 5-10 giây rồi bấm 'Kiểm tra kết nối' lại, hoặc tạo API Key từ một tài khoản Google khác."
+        });
+      }
 
       if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED')) {
         return res.status(429).json({

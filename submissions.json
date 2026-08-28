@@ -1,1 +1,19 @@
-[]
+[
+  {
+    "id": "sub_1787917046830_httvi",
+    "teacherId": "tea_phung_3jaj8r",
+    "teacherEmail": "phungthanhhq@gmail.com",
+    "quizTitle": "Ngữ văn Lớp 6: Trái đất",
+    "subject": "Ngữ văn",
+    "grade": "6",
+    "studentName": "Ma Bá An",
+    "studentClass": "7A",
+    "score": 8,
+    "correctCount": 8,
+    "totalCount": 10,
+    "timeSpentSeconds": 41,
+    "submittedAt": 1787917046830,
+    "attemptNumber": 1,
+    "answersDetails": []
+  }
+]

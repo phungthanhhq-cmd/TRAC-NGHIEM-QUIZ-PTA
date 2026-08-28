@@ -91,10 +91,21 @@ const App: React.FC = () => {
         const teacherId = getTeacherId();
         const teacherEmail = getTeacherEmail();
         const res = await fetch(`/api/teacher-submissions?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(teacherEmail)}`);
+        let totalCount = 0;
         if (res.ok) {
           const data = await res.json();
-          setSubmissionCount((data.submissions || []).length);
+          totalCount = (data.submissions || []).length;
         }
+        try {
+          const localSubsRaw = localStorage.getItem('teacher_local_submissions');
+          if (localSubsRaw) {
+            const localSubs = JSON.parse(localSubsRaw);
+            if (Array.isArray(localSubs) && localSubs.length > totalCount) {
+              totalCount = localSubs.length;
+            }
+          }
+        } catch (le) {}
+        setSubmissionCount(totalCount);
       } catch (e) {
         // silent fail
       }

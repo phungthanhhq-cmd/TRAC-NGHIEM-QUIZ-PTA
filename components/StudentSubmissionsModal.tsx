@@ -38,6 +38,28 @@ interface StudentSubmissionsModalProps {
   onClose: () => void;
 }
 
+function normalizeVietnamese(str: string): string {
+  if (!str) return '';
+  return str
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function isStudentNameMatch(rosterName: string, subName: string): boolean {
+  const rNorm = normalizeVietnamese(rosterName);
+  const sNorm = normalizeVietnamese(subName);
+  if (!rNorm || !sNorm) return false;
+  if (rNorm === sNorm) return true;
+  if (rNorm.endsWith(' ' + sNorm) || sNorm.endsWith(' ' + rNorm)) return true;
+  if (rNorm.includes(sNorm) && sNorm.length >= 2) return true;
+  return false;
+}
+
 const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   isOpen,
   onClose
@@ -101,7 +123,33 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
       }
 
       const data = await res.json();
-      setSubmissions(data.submissions || []);
+      const serverSubs: StudentSubmission[] = data.submissions || [];
+      
+      // Merge with any locally recorded submissions (from client test/preview)
+      let combined = [...serverSubs];
+      try {
+        const localSubsRaw = localStorage.getItem('teacher_local_submissions');
+        if (localSubsRaw) {
+          const localSubs: StudentSubmission[] = JSON.parse(localSubsRaw);
+          localSubs.forEach(loc => {
+            const exists = combined.some(s => 
+              s.id === loc.id || 
+              (s.studentName.toLowerCase() === loc.studentName.toLowerCase() && 
+               s.quizTitle === loc.quizTitle && 
+               Math.abs(s.submittedAt - loc.submittedAt) < 5000)
+            );
+            if (!exists) {
+              combined.push(loc);
+            }
+          });
+        }
+      } catch (e) {
+        // ignore parse error
+      }
+
+      // Sort newest first
+      combined.sort((a, b) => b.submittedAt - a.submittedAt);
+      setSubmissions(combined);
       setError(null);
     } catch (err: any) {
       if (!isBackground) {
@@ -182,10 +230,11 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   const filteredSubmissions = useMemo(() => {
     return submissions.filter(s => {
       const matchQuiz = selectedQuiz === 'all' || s.quizTitle === selectedQuiz;
-      const matchClass = selectedClass === 'all' || s.studentClass === selectedClass;
-      const matchSearch = !searchTerm.trim() || 
-        s.studentName.toLowerCase().includes(searchTerm.toLowerCase().trim()) ||
-        (s.studentClass && s.studentClass.toLowerCase().includes(searchTerm.toLowerCase().trim()));
+      const matchClass = selectedClass === 'all' || (s.studentClass && s.studentClass.toLowerCase().trim() === selectedClass.toLowerCase().trim());
+      const searchNorm = normalizeVietnamese(searchTerm);
+      const matchSearch = !searchNorm || 
+        normalizeVietnamese(s.studentName).includes(searchNorm) ||
+        normalizeVietnamese(s.studentClass || '').includes(searchNorm);
       return matchQuiz && matchClass && matchSearch;
     });
   }, [submissions, selectedQuiz, selectedClass, searchTerm]);
@@ -244,24 +293,14 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     }
 
     // Find roster for this class
-    const roster = rosters.find(r => r.className.toLowerCase() === trackingClass.toLowerCase());
+    const roster = rosters.find(r => r.className.toLowerCase().trim() === trackingClass.toLowerCase().trim());
     const rosterNames = roster ? roster.studentNames : [];
 
     // Find submissions for this class and quiz
     const classSubs = submissions.filter(s => {
-      const matchClass = s.studentClass && s.studentClass.toLowerCase() === trackingClass.toLowerCase();
+      const matchClass = !trackingClass || (s.studentClass && s.studentClass.toLowerCase().trim() === trackingClass.toLowerCase().trim());
       const matchQuiz = !trackingQuiz || s.quizTitle === trackingQuiz;
       return matchClass && matchQuiz;
-    });
-
-    // Map highest score per student
-    const studentSubmissionMap = new Map<string, StudentSubmission>();
-    classSubs.forEach(sub => {
-      const cleanName = sub.studentName.trim().toLowerCase();
-      const existing = studentSubmissionMap.get(cleanName);
-      if (!existing || sub.score > existing.score) {
-        studentSubmissionMap.set(cleanName, sub);
-      }
     });
 
     const doneStudents: {
@@ -278,47 +317,55 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     const notDoneStudents: string[] = [];
 
     if (rosterNames.length > 0) {
+      // Track which submissions have been matched with a roster student
+      const matchedSubIds = new Set<string>();
+
       rosterNames.forEach(name => {
-        const cleanName = name.trim().toLowerCase();
-        const sub = studentSubmissionMap.get(cleanName);
-        if (sub) {
+        // Find best match in classSubs for this roster student
+        const candidateSubs = classSubs.filter(sub => isStudentNameMatch(name, sub.studentName));
+        if (candidateSubs.length > 0) {
+          // Pick the one with highest score or most recent
+          candidateSubs.sort((a, b) => b.score - a.score || b.submittedAt - a.submittedAt);
+          const bestSub = candidateSubs[0];
+          matchedSubIds.add(bestSub.id);
           doneStudents.push({
-            name,
-            submission: sub,
-            score: sub.score,
-            correctCount: sub.correctCount,
-            totalCount: sub.totalCount,
-            timeSpentSeconds: sub.timeSpentSeconds,
-            submittedAt: sub.submittedAt,
-            attemptNumber: sub.attemptNumber
+            name, // Display the full official roster name
+            submission: bestSub,
+            score: bestSub.score,
+            correctCount: bestSub.correctCount,
+            totalCount: bestSub.totalCount,
+            timeSpentSeconds: bestSub.timeSpentSeconds,
+            submittedAt: bestSub.submittedAt,
+            attemptNumber: bestSub.attemptNumber
           });
         } else {
           notDoneStudents.push(name);
         }
       });
 
-      // Also append students who submitted but were not in official roster
+      // Also append any extra submissions that didn't match any roster name
       classSubs.forEach(sub => {
-        const cleanName = sub.studentName.trim().toLowerCase();
-        const isInRoster = rosterNames.some(rn => rn.trim().toLowerCase() === cleanName);
-        if (!isInRoster && !doneStudents.some(d => d.name.toLowerCase() === cleanName)) {
-          doneStudents.push({
-            name: sub.studentName,
-            submission: sub,
-            score: sub.score,
-            correctCount: sub.correctCount,
-            totalCount: sub.totalCount,
-            timeSpentSeconds: sub.timeSpentSeconds,
-            submittedAt: sub.submittedAt,
-            attemptNumber: sub.attemptNumber
-          });
+        if (!matchedSubIds.has(sub.id)) {
+          const alreadyAdded = doneStudents.some(d => isStudentNameMatch(d.name, sub.studentName));
+          if (!alreadyAdded) {
+            matchedSubIds.add(sub.id);
+            doneStudents.push({
+              name: sub.studentName,
+              submission: sub,
+              score: sub.score,
+              correctCount: sub.correctCount,
+              totalCount: sub.totalCount,
+              timeSpentSeconds: sub.timeSpentSeconds,
+              submittedAt: sub.submittedAt,
+              attemptNumber: sub.attemptNumber
+            });
+          }
         }
       });
     } else {
       // If no official roster saved, all submitted students are "done"
       classSubs.forEach(sub => {
-        const cleanName = sub.studentName.trim().toLowerCase();
-        if (!doneStudents.some(d => d.name.toLowerCase() === cleanName)) {
+        if (!doneStudents.some(d => d.name.toLowerCase() === sub.studentName.toLowerCase())) {
           doneStudents.push({
             name: sub.studentName,
             submission: sub,
@@ -889,11 +936,19 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
                   <div className="w-16 h-16 bg-slate-100 text-slate-400 rounded-full flex items-center justify-center">
                     <Users className="w-8 h-8" />
                   </div>
-                  <div className="max-w-sm">
+                  <div className="max-w-md">
                     <h3 className="font-bold text-slate-700 text-sm">Chưa có học sinh nào nộp bài</h3>
                     <p className="text-xs text-slate-500 mt-1 leading-relaxed">
                       Hãy gửi link bài tập cho học sinh. Khi học sinh làm xong và bấm "Nộp bài", kết quả sẽ tự động lưu và hiển thị tại đây theo thời gian thực.
                     </p>
+                    <div className="mt-4 flex items-center justify-center gap-2">
+                      <button
+                        onClick={() => setActiveTab('manageRosters')}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 transition-all active:scale-95"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> Thêm Danh Sách Lớp Để Kiểm Soát
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (
@@ -1027,13 +1082,10 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
                     onChange={(e) => setTrackingClass(e.target.value)}
                     className="text-xs py-1.5 px-3 rounded-xl border border-slate-300 bg-white text-slate-800 font-bold outline-none focus:ring-2 focus:ring-purple-500 shadow-xs"
                   >
-                    {classList.length === 0 ? (
-                      <option value="">Chưa có lớp nào</option>
-                    ) : (
-                      classList.map(c => (
-                        <option key={c} value={c}>Lớp {c}</option>
-                      ))
-                    )}
+                    <option value="">Tất cả các lớp ({classList.length > 0 ? `${classList.length} lớp` : 'Chung'})</option>
+                    {classList.map(c => (
+                      <option key={c} value={c}>Lớp {c}</option>
+                    ))}
                   </select>
                 </div>
 
