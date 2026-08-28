@@ -73,8 +73,13 @@ export const DEFAULT_TEACHER_EMAIL = 'phungthanhhq@gmail.com';
  * Gets the current teacher's Gmail address
  */
 export function getTeacherEmail(): string {
-  if (typeof window === 'undefined') return DEFAULT_TEACHER_EMAIL;
-  return localStorage.getItem('teacher_gmail') || DEFAULT_TEACHER_EMAIL;
+  if (typeof window === 'undefined') return '';
+  const stored = localStorage.getItem('teacher_gmail');
+  if (stored && stored.trim()) {
+    return stored.trim().toLowerCase();
+  }
+  // Initialize with user email if available in metadata or fallback
+  return DEFAULT_TEACHER_EMAIL;
 }
 
 /**
@@ -89,15 +94,27 @@ export function setTeacherEmail(email: string): void {
 }
 
 /**
- * Derives a deterministic teacher ID from the teacher's Gemini API key (or local storage/email).
- * This ensures each teacher only accesses the submissions for their own quizzes!
+ * Derives a deterministic teacher ID from the teacher's Gmail or API key.
+ * This ensures each teacher only accesses the submissions for their own quizzes and accounts!
  */
 export function getTeacherId(apiKey?: string, email?: string): string {
   if (typeof window === 'undefined') return 'tea_default';
 
-  const teacherEmail = email || getTeacherEmail();
+  const teacherEmail = (email || getTeacherEmail() || '').trim().toLowerCase();
+  if (teacherEmail) {
+    // Generate deterministic clean hash strictly from teacher Gmail
+    let hash = 0;
+    for (let i = 0; i < teacherEmail.length; i++) {
+      const char = teacherEmail.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash |= 0;
+    }
+    const cleanHash = Math.abs(hash).toString(36);
+    const prefix = teacherEmail.split('@')[0].slice(0, 6).replace(/[^a-zA-Z0-9]/g, '');
+    return `tea_${prefix || 'acc'}_${cleanHash}`;
+  }
+
   const key = apiKey || localStorage.getItem('gemini_user_api_key') || '';
-  
   if (key.trim()) {
     // Generate deterministic clean hash from API key
     let hash = 0;
@@ -112,21 +129,7 @@ export function getTeacherId(apiKey?: string, email?: string): string {
     return `tea_${cleanHash}_${suffix}`;
   }
 
-  if (teacherEmail.trim()) {
-    // Generate deterministic clean hash from teacher Gmail
-    let hash = 0;
-    const str = teacherEmail.trim().toLowerCase();
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash |= 0;
-    }
-    const cleanHash = Math.abs(hash).toString(36);
-    const prefix = str.split('@')[0].slice(0, 5).replace(/[^a-zA-Z0-9]/g, '');
-    return `tea_${prefix}_${cleanHash}`;
-  }
-
-  // Fallback persistent ID for this teacher browser if no API key
+  // Fallback persistent ID for this browser if no email or API key
   let fallbackId = localStorage.getItem('teacher_device_id');
   if (!fallbackId) {
     fallbackId = 'tea_' + Math.random().toString(36).substring(2, 10);
@@ -267,7 +270,7 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
             subject: tuple[2],
             grade: tuple[3],
             teacherId: tuple[5],
-            teacherEmail: tuple[6] || DEFAULT_TEACHER_EMAIL,
+            teacherEmail: tuple[6] ? tuple[6].trim().toLowerCase() : undefined,
             isSharedLink: true,
             questions: questionsList
           };

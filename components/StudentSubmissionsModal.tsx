@@ -97,17 +97,24 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   const [rawStudentNamesText, setRawStudentNamesText] = useState('');
   const [isSavingRoster, setIsSavingRoster] = useState(false);
 
-  const teacherId = useMemo(() => getTeacherId(), []);
+  const teacherId = useMemo(() => getTeacherId(undefined, currentTeacherEmail), [currentTeacherEmail]);
 
-  // Fetch Submissions
-  const fetchSubmissions = async (isBackground = false) => {
+  // Fetch Submissions strictly for a given email
+  const fetchSubmissions = async (emailToUse?: string, isBackground = false) => {
+    const targetEmail = (emailToUse !== undefined ? emailToUse : currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+    const targetId = getTeacherId(undefined, targetEmail);
+
     if (!isBackground) {
       setIsLoading(true);
       setError(null);
     }
     try {
-      const email = getTeacherEmail();
-      const res = await fetch(`/api/teacher-submissions?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(email)}`);
+      if (!targetEmail && !targetId) {
+        setSubmissions([]);
+        return;
+      }
+
+      const res = await fetch(`/api/teacher-submissions?teacherId=${encodeURIComponent(targetId)}&teacherEmail=${encodeURIComponent(targetEmail)}`);
       
       const contentType = res.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
@@ -125,13 +132,17 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
       const data = await res.json();
       const serverSubs: StudentSubmission[] = data.submissions || [];
       
-      // Merge with any locally recorded submissions (from client test/preview)
+      // Merge with any locally recorded submissions (matching THIS specific teacher email)
       let combined = [...serverSubs];
       try {
         const localSubsRaw = localStorage.getItem('teacher_local_submissions');
         if (localSubsRaw) {
-          const localSubs: StudentSubmission[] = JSON.parse(localSubsRaw);
+          const localSubs: any[] = JSON.parse(localSubsRaw);
           localSubs.forEach(loc => {
+            const locEmail = (loc.teacherEmail || '').toLowerCase().trim();
+            if (targetEmail && locEmail && locEmail !== targetEmail) {
+              return; // skip submissions from other accounts
+            }
             const exists = combined.some(s => 
               s.id === loc.id || 
               (s.studentName.toLowerCase() === loc.studentName.toLowerCase() && 
@@ -163,11 +174,17 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     }
   };
 
-  // Fetch Class Rosters
-  const fetchRosters = async () => {
+  // Fetch Class Rosters strictly for a given email
+  const fetchRosters = async (emailToUse?: string) => {
+    const targetEmail = (emailToUse !== undefined ? emailToUse : currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+    const targetId = getTeacherId(undefined, targetEmail);
+
     try {
-      const email = getTeacherEmail();
-      const res = await fetch(`/api/class-rosters?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(email)}`);
+      if (!targetEmail && !targetId) {
+        setRosters([]);
+        return;
+      }
+      const res = await fetch(`/api/class-rosters?teacherId=${encodeURIComponent(targetId)}&teacherEmail=${encodeURIComponent(targetEmail)}`);
       const contentType = res.headers.get('content-type') || '';
       if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
@@ -182,16 +199,16 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     if (isOpen) {
       const email = getTeacherEmail();
       setCurrentTeacherEmail(email);
-      fetchSubmissions(false);
-      fetchRosters();
+      fetchSubmissions(email, false);
+      fetchRosters(email);
 
       const interval = setInterval(() => {
-        fetchSubmissions(true);
+        fetchSubmissions(undefined, true);
       }, 6000);
 
       return () => clearInterval(interval);
     }
-  }, [isOpen, teacherId]);
+  }, [isOpen]);
 
   // Unique list of quizzes and classes for filter dropdowns
   const quizTitles = useMemo(() => {
@@ -419,13 +436,14 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
 
     setIsSavingRoster(true);
     try {
-      const email = getTeacherEmail();
+      const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+      const tId = getTeacherId(undefined, email);
       const res = await fetch('/api/class-rosters', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           id: editingRosterId || undefined,
-          teacherId,
+          teacherId: tId,
           teacherEmail: email,
           className: newClassName.trim(),
           studentNames: names
@@ -436,7 +454,7 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
         setNewClassName('');
         setRawStudentNamesText('');
         setEditingRosterId(null);
-        await fetchRosters();
+        await fetchRosters(email);
         setActiveTab('classTracking');
         setTrackingClass(newClassName.trim());
       } else {
@@ -462,7 +480,9 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   const handleDeleteRoster = async (id: string) => {
     if (!confirm('Bạn có chắc chắn muốn xóa danh sách lớp này?')) return;
     try {
-      const res = await fetch(`/api/class-rosters/${id}`, {
+      const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+      const tId = getTeacherId(undefined, email);
+      const res = await fetch(`/api/class-rosters/${id}?teacherId=${encodeURIComponent(tId)}&teacherEmail=${encodeURIComponent(email)}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -489,15 +509,28 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     }
   };
 
-  // Handle Teacher Email Update
-  const handleSaveTeacherEmail = () => {
+  // Handle Teacher Email Update (Switch account)
+  const handleSaveTeacherEmail = async () => {
     const clean = emailInput.trim().toLowerCase();
     if (clean) {
       setTeacherEmail(clean);
       setCurrentTeacherEmail(clean);
       setIsEditingEmail(false);
-      fetchSubmissions(false);
-      fetchRosters();
+      setEmailInput('');
+      
+      // Reset current view state for new account
+      setSubmissions([]);
+      setRosters([]);
+      setTrackingQuiz('');
+      setTrackingClass('');
+      setSelectedQuiz('all');
+      setSelectedClass('all');
+      setSearchTerm('');
+      
+      await Promise.all([
+        fetchSubmissions(clean, false),
+        fetchRosters(clean)
+      ]);
     }
   };
 
@@ -578,8 +611,9 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   // Handle delete submission
   const handleDeleteSubmission = async (id: string) => {
     try {
-      const email = getTeacherEmail();
-      const res = await fetch(`/api/teacher-submissions/${id}?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(email)}`, {
+      const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+      const tId = getTeacherId(undefined, email);
+      const res = await fetch(`/api/teacher-submissions/${id}?teacherId=${encodeURIComponent(tId)}&teacherEmail=${encodeURIComponent(email)}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -596,8 +630,9 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   // Handle clear all
   const handleClearAll = async () => {
     try {
-      const email = getTeacherEmail();
-      const res = await fetch(`/api/teacher-submissions/clear-all?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(email)}`, {
+      const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+      const tId = getTeacherId(undefined, email);
+      const res = await fetch(`/api/teacher-submissions/clear-all?teacherId=${encodeURIComponent(tId)}&teacherEmail=${encodeURIComponent(email)}`, {
         method: 'DELETE'
       });
       if (res.ok) {

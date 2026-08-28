@@ -178,20 +178,25 @@ async function startServer() {
         answersDetails
       } = req.body;
 
-      const tId = (teacherId && typeof teacherId === 'string') ? teacherId.trim() : 'tea_default';
       const tEmail = (teacherEmail && typeof teacherEmail === 'string') ? teacherEmail.trim().toLowerCase() : '';
+      const tId = (teacherId && typeof teacherId === 'string' && teacherId.trim()) 
+        ? teacherId.trim() 
+        : (tEmail ? `tea_${tEmail.split('@')[0]}` : 'tea_default');
       const sName = (studentName && typeof studentName === 'string' && studentName.trim()) 
         ? studentName.trim() 
         : 'Học sinh';
       const sClass = (studentClass && typeof studentClass === 'string') ? studentClass.trim() : '';
 
       // Count previous attempts for this student on this quiz & teacher
-      const previousAttempts = submissions.filter(s => 
-        (s.teacherId === tId || (tEmail && s.teacherEmail && s.teacherEmail.toLowerCase() === tEmail)) &&
-        s.quizTitle === quizTitle &&
-        s.studentName.toLowerCase() === sName.toLowerCase() &&
-        (sClass ? s.studentClass.toLowerCase() === sClass.toLowerCase() : true)
-      );
+      const previousAttempts = submissions.filter(s => {
+        const matchTeacher = tEmail 
+          ? (s.teacherEmail && s.teacherEmail.toLowerCase() === tEmail)
+          : (s.teacherId === tId);
+        return matchTeacher &&
+          s.quizTitle === quizTitle &&
+          s.studentName.toLowerCase() === sName.toLowerCase() &&
+          (sClass ? s.studentClass.toLowerCase() === sClass.toLowerCase() : true);
+      });
 
       const attemptNumber = previousAttempts.length + 1;
 
@@ -228,7 +233,7 @@ async function startServer() {
     }
   });
 
-  // API Route: Teacher retrieves submission records filtered strictly by their teacherId or teacherEmail
+  // API Route: Teacher retrieves submission records filtered strictly by their teacherEmail or teacherId
   app.get('/api/teacher-submissions', (req, res) => {
     try {
       const { teacherId, teacherEmail } = req.query;
@@ -236,14 +241,21 @@ async function startServer() {
       const tEmail = typeof teacherEmail === 'string' ? teacherEmail.trim().toLowerCase() : '';
 
       if (!tId && !tEmail) {
-        return res.status(400).json({ error: 'Thiếu mã định danh giáo viên hoặc email' });
+        return res.json({ submissions: [] });
       }
 
-      // Filter submissions belonging to this teacher by ID or by Gmail
+      // Filter submissions belonging strictly to this teacher:
       const teacherSubs = submissions.filter(s => {
-        if (tId && s.teacherId === tId) return true;
-        if (tEmail && s.teacherEmail && s.teacherEmail.toLowerCase() === tEmail) return true;
-        if (s.teacherId === 'tea_default' || !s.teacherId) return true;
+        if (tEmail) {
+          if (s.teacherEmail) {
+            return s.teacherEmail.toLowerCase() === tEmail;
+          }
+          // Only fallback to teacherId if submission had no email recorded
+          return tId && s.teacherId === tId && s.teacherId !== 'tea_default';
+        }
+        if (tId && tId !== 'tea_default') {
+          return s.teacherId === tId && !s.teacherEmail;
+        }
         return false;
       });
 
@@ -263,12 +275,17 @@ async function startServer() {
       const tEmail = typeof teacherEmail === 'string' ? teacherEmail.trim().toLowerCase() : '';
 
       if (!tId && !tEmail) {
-        return res.status(400).json({ error: 'Thiếu mã định danh giáo viên' });
+        return res.status(400).json({ error: 'Thiếu thông tin tài khoản giáo viên' });
       }
 
       const isTeacherMatch = (s: SubmissionStoreItem) => {
-        if (tId && s.teacherId === tId) return true;
-        if (tEmail && s.teacherEmail && s.teacherEmail.toLowerCase() === tEmail) return true;
+        if (tEmail) {
+          if (s.teacherEmail) return s.teacherEmail.toLowerCase() === tEmail;
+          return tId && s.teacherId === tId && s.teacherId !== 'tea_default';
+        }
+        if (tId && tId !== 'tea_default') {
+          return s.teacherId === tId && !s.teacherEmail;
+        }
         return false;
       };
 
@@ -293,9 +310,20 @@ async function startServer() {
       const tId = typeof teacherId === 'string' ? teacherId.trim() : '';
       const tEmail = typeof teacherEmail === 'string' ? teacherEmail.trim().toLowerCase() : '';
 
+      if (!tId && !tEmail) {
+        return res.json({ rosters: [] });
+      }
+
       const matched = classRosters.filter(r => {
-        if (tId && r.teacherId === tId) return true;
-        if (tEmail && r.teacherEmail && r.teacherEmail.toLowerCase() === tEmail) return true;
+        if (tEmail) {
+          if (r.teacherEmail) {
+            return r.teacherEmail.toLowerCase() === tEmail;
+          }
+          return tId && r.teacherId === tId && r.teacherId !== 'tea_default';
+        }
+        if (tId && tId !== 'tea_default') {
+          return r.teacherId === tId && !r.teacherEmail;
+        }
         return false;
       });
 
@@ -310,8 +338,10 @@ async function startServer() {
   app.post('/api/class-rosters', (req, res) => {
     try {
       const { id, teacherId, teacherEmail, className, studentNames } = req.body;
-      const tId = (teacherId && typeof teacherId === 'string') ? teacherId.trim() : 'tea_default';
       const tEmail = (teacherEmail && typeof teacherEmail === 'string') ? teacherEmail.trim().toLowerCase() : '';
+      const tId = (teacherId && typeof teacherId === 'string' && teacherId.trim()) 
+        ? teacherId.trim() 
+        : (tEmail ? `tea_${tEmail.split('@')[0]}` : 'tea_default');
       const cName = (className && typeof className === 'string') ? className.trim() : '';
       const names = Array.isArray(studentNames) 
         ? studentNames.map((n: string) => String(n).trim()).filter((n: string) => n.length > 0)
@@ -320,11 +350,18 @@ async function startServer() {
       if (!cName) {
         return res.status(400).json({ error: 'Tên lớp không được để trống' });
       }
+      if (!tEmail && !tId) {
+        return res.status(400).json({ error: 'Thiếu email giáo viên để lưu lớp' });
+      }
 
-      const existingIdx = classRosters.findIndex(r => 
-        (id && r.id === id) || 
-        (r.className.toLowerCase() === cName.toLowerCase() && (r.teacherId === tId || (tEmail && r.teacherEmail === tEmail)))
-      );
+      const existingIdx = classRosters.findIndex(r => {
+        if (id && r.id === id) return true;
+        const sameClassName = r.className.toLowerCase().trim() === cName.toLowerCase().trim();
+        const sameTeacher = tEmail 
+          ? (r.teacherEmail && r.teacherEmail.toLowerCase() === tEmail)
+          : (r.teacherId === tId);
+        return sameClassName && sameTeacher;
+      });
 
       const rosterItem: ClassRosterItem = {
         id: id || ('ros_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6)),
@@ -354,7 +391,21 @@ async function startServer() {
   app.delete('/api/class-rosters/:id', (req, res) => {
     try {
       const { id } = req.params;
-      classRosters = classRosters.filter(r => r.id !== id);
+      const { teacherId, teacherEmail } = req.query;
+      const tId = typeof teacherId === 'string' ? teacherId.trim() : '';
+      const tEmail = typeof teacherEmail === 'string' ? teacherEmail.trim().toLowerCase() : '';
+
+      classRosters = classRosters.filter(r => {
+        if (r.id !== id) return true;
+        // Verify ownership if deleting
+        if (tEmail && r.teacherEmail) {
+          return r.teacherEmail.toLowerCase() !== tEmail;
+        }
+        if (tId && r.teacherId) {
+          return r.teacherId !== tId;
+        }
+        return false;
+      });
       saveClassRostersToFile();
       return res.json({ success: true });
     } catch (err) {

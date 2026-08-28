@@ -88,8 +88,8 @@ const App: React.FC = () => {
     // Check student submissions count for this teacher
     const checkSubmissions = async () => {
       try {
-        const teacherId = getTeacherId();
         const teacherEmail = getTeacherEmail();
+        const teacherId = getTeacherId(undefined, teacherEmail);
         const res = await fetch(`/api/teacher-submissions?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(teacherEmail)}`);
         let totalCount = 0;
         if (res.ok) {
@@ -100,8 +100,15 @@ const App: React.FC = () => {
           const localSubsRaw = localStorage.getItem('teacher_local_submissions');
           if (localSubsRaw) {
             const localSubs = JSON.parse(localSubsRaw);
-            if (Array.isArray(localSubs) && localSubs.length > totalCount) {
-              totalCount = localSubs.length;
+            if (Array.isArray(localSubs)) {
+              const matchedLocal = localSubs.filter((s: any) => {
+                const sEmail = (s.teacherEmail || '').toLowerCase().trim();
+                const tEmail = (teacherEmail || '').toLowerCase().trim();
+                return tEmail && sEmail ? sEmail === tEmail : true;
+              });
+              if (matchedLocal.length > totalCount) {
+                totalCount = matchedLocal.length;
+              }
             }
           }
         } catch (le) {}
