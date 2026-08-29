@@ -1,0 +1,14 @@
+[
+  {
+    "id": "ros_1788001833408_gkgd",
+    "teacherId": "tea_test",
+    "teacherEmail": "phungthanhhq@gmail.com",
+    "className": "12A1",
+    "studentNames": [
+      "Nguyễn Văn A",
+      "Trần Thị B"
+    ],
+    "createdAt": 1788001833408,
+    "updatedAt": 1788001833408
+  }
+]

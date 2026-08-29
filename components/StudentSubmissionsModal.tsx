@@ -88,7 +88,7 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   // Class Tracking Filters
   const [trackingQuiz, setTrackingQuiz] = useState<string>('');
   const [trackingClass, setTrackingClass] = useState<string>('');
-  const [trackingSubTab, setTrackingSubTab] = useState<'done' | 'notDone'>('done');
+  const [trackingSubTab, setTrackingSubTab] = useState<'done' | 'notDone' | 'matrix'>('done');
   const [copiedNotDone, setCopiedNotDone] = useState(false);
 
   // Manage Roster Form
@@ -174,25 +174,55 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     }
   };
 
-  // Fetch Class Rosters strictly for a given email
+  // Fetch Class Rosters strictly for a given email (with offline & local fallback)
   const fetchRosters = async (emailToUse?: string) => {
     const targetEmail = (emailToUse !== undefined ? emailToUse : currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
     const targetId = getTeacherId(undefined, targetEmail);
 
+    // 1. First load from local storage
+    let combinedRosters: ClassRoster[] = [];
     try {
-      if (!targetEmail && !targetId) {
-        setRosters([]);
-        return;
+      const localRostersRaw = localStorage.getItem('teacher_local_rosters');
+      if (localRostersRaw) {
+        const localList: any[] = JSON.parse(localRostersRaw);
+        if (Array.isArray(localList)) {
+          combinedRosters = localList.filter(r => {
+            const rEmail = (r.teacherEmail || '').toLowerCase().trim();
+            return targetEmail && rEmail ? rEmail === targetEmail : true;
+          });
+        }
       }
-      const res = await fetch(`/api/class-rosters?teacherId=${encodeURIComponent(targetId)}&teacherEmail=${encodeURIComponent(targetEmail)}`);
-      const contentType = res.headers.get('content-type') || '';
-      if (res.ok && contentType.includes('application/json')) {
-        const data = await res.json();
-        setRosters(data.rosters || []);
+    } catch (e) {
+      console.warn('Error reading local rosters:', e);
+    }
+
+    try {
+      if (targetEmail || targetId) {
+        const res = await fetch(`/api/class-rosters?teacherId=${encodeURIComponent(targetId)}&teacherEmail=${encodeURIComponent(targetEmail)}`);
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && contentType.includes('application/json')) {
+          const data = await res.json();
+          const serverRosters: ClassRoster[] = data.rosters || [];
+          
+          // Merge server rosters with local rosters
+          serverRosters.forEach(sr => {
+            const idx = combinedRosters.findIndex(r => r.id === sr.id || (r.className.toLowerCase() === sr.className.toLowerCase()));
+            if (idx >= 0) {
+              combinedRosters[idx] = sr;
+            } else {
+              combinedRosters.push(sr);
+            }
+          });
+          
+          // Update local cache
+          localStorage.setItem('teacher_local_rosters', JSON.stringify(combinedRosters));
+        }
       }
     } catch (err) {
-      console.error('Error fetching rosters:', err);
+      console.warn('Server offline or static deployment, using local rosters cache:', err);
     }
+
+    setRosters(combinedRosters);
   };
 
   useEffect(() => {
@@ -417,7 +447,84 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     };
   }, [trackingClass, trackingQuiz, rosters, submissions]);
 
-  // Handle Save Roster
+  // Quizzes that this class has participated in or all quizzes
+  const classQuizzes = useMemo(() => {
+    if (!trackingClass) return quizTitles;
+    const set = new Set<string>();
+    submissions.forEach(s => {
+      if (s.studentClass && s.studentClass.toLowerCase().trim() === trackingClass.toLowerCase().trim()) {
+        if (s.quizTitle) set.add(s.quizTitle);
+      }
+    });
+    // If no submissions yet, include all known quiz titles
+    if (set.size === 0) {
+      quizTitles.forEach(t => set.add(t));
+    }
+    return Array.from(set);
+  }, [submissions, trackingClass, quizTitles]);
+
+  // Class Matrix Gradebook (Tất cả bài tập x Từng học sinh trong lớp)
+  const classMatrixData = useMemo(() => {
+    if (!trackingClass) return { students: [], quizzes: [] };
+    const roster = rosters.find(r => r.className.toLowerCase().trim() === trackingClass.toLowerCase().trim());
+    let rosterNames = roster ? [...roster.studentNames] : [];
+
+    const classSubs = submissions.filter(s => 
+      s.studentClass && s.studentClass.toLowerCase().trim() === trackingClass.toLowerCase().trim()
+    );
+
+    // If there are students who submitted but not in official roster, append them
+    classSubs.forEach(s => {
+      if (!rosterNames.some(rn => isStudentNameMatch(rn, s.studentName))) {
+        rosterNames.push(s.studentName);
+      }
+    });
+
+    const quizzes = classQuizzes;
+
+    const students = rosterNames.map((name, idx) => {
+      const quizScores: Record<string, { score: number; attemptNumber: number; correctCount: number; totalCount: number; submission?: StudentSubmission } | null> = {};
+      let totalScore = 0;
+      let completedCount = 0;
+
+      quizzes.forEach(quiz => {
+        const matchingSubs = classSubs.filter(s => s.quizTitle === quiz && isStudentNameMatch(name, s.studentName));
+        if (matchingSubs.length > 0) {
+          matchingSubs.sort((a, b) => b.score - a.score || b.submittedAt - a.submittedAt);
+          const best = matchingSubs[0];
+          quizScores[quiz] = {
+            score: best.score,
+            attemptNumber: best.attemptNumber || 1,
+            correctCount: best.correctCount,
+            totalCount: best.totalCount,
+            submission: best
+          };
+          totalScore += best.score;
+          completedCount++;
+        } else {
+          quizScores[quiz] = null;
+        }
+      });
+
+      const avgScore = completedCount > 0 ? Math.round((totalScore / completedCount) * 10) / 10 : null;
+
+      return {
+        stt: idx + 1,
+        name,
+        quizScores,
+        completedCount,
+        totalQuizzes: quizzes.length,
+        avgScore
+      };
+    });
+
+    return {
+      students,
+      quizzes
+    };
+  }, [trackingClass, rosters, classQuizzes, submissions]);
+
+  // Handle Save Roster (Local storage + server background sync)
   const handleSaveRoster = async () => {
     if (!newClassName.trim()) {
       alert('Vui lòng nhập tên lớp (ví dụ: 12A1, 10A3...)');
@@ -426,7 +533,7 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
 
     const names = rawStudentNamesText
       .split('\n')
-      .map(n => n.replace(/^[0-9]+[.\-)\s]+/, '').trim()) // remove leading numbers like "1. ", "2 - "
+      .map(n => n.replace(/^[\d\s.\-/#:\)\(]+/, '').replace(/\t.*$/, '').trim()) // remove leading numbers, bullets, trailing tabs
       .filter(n => n.length > 0);
 
     if (names.length === 0) {
@@ -435,36 +542,71 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     }
 
     setIsSavingRoster(true);
+    const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+    const tId = getTeacherId(undefined, email);
+    const targetClassName = newClassName.trim();
+    const rosterId = editingRosterId || `roster_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+    const newRosterObj: ClassRoster = {
+      id: rosterId,
+      teacherId: tId,
+      teacherEmail: email,
+      className: targetClassName,
+      studentNames: names,
+      createdAt: Date.now()
+    };
+
+    // 1. Immediately save to LocalStorage so data is NEVER lost regardless of network/Vercel static hosting
     try {
-      const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
-      const tId = getTeacherId(undefined, email);
-      const res = await fetch('/api/class-rosters', {
+      const localRostersRaw = localStorage.getItem('teacher_local_rosters');
+      let localList: ClassRoster[] = localRostersRaw ? JSON.parse(localRostersRaw) : [];
+      if (!Array.isArray(localList)) localList = [];
+
+      const existingIndex = localList.findIndex(r => r.id === rosterId || (r.className.toLowerCase() === targetClassName.toLowerCase() && (r.teacherEmail || '').toLowerCase() === email));
+      if (existingIndex >= 0) {
+        localList[existingIndex] = { ...localList[existingIndex], ...newRosterObj };
+      } else {
+        localList.push(newRosterObj);
+      }
+      localStorage.setItem('teacher_local_rosters', JSON.stringify(localList));
+
+      // Update state immediately
+      setRosters(prev => {
+        const next = [...prev];
+        const idx = next.findIndex(r => r.id === rosterId || (r.className.toLowerCase() === targetClassName.toLowerCase() && (r.teacherEmail || '').toLowerCase() === email));
+        if (idx >= 0) {
+          next[idx] = newRosterObj;
+        } else {
+          next.push(newRosterObj);
+        }
+        return next;
+      });
+    } catch (localErr) {
+      console.warn('Error saving to local storage:', localErr);
+    }
+
+    // 2. Try server sync in background if available
+    try {
+      await fetch('/api/class-rosters', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          id: editingRosterId || undefined,
+          id: rosterId,
           teacherId: tId,
           teacherEmail: email,
-          className: newClassName.trim(),
+          className: targetClassName,
           studentNames: names
         })
       });
-
-      if (res.ok) {
-        setNewClassName('');
-        setRawStudentNamesText('');
-        setEditingRosterId(null);
-        await fetchRosters(email);
-        setActiveTab('classTracking');
-        setTrackingClass(newClassName.trim());
-      } else {
-        alert('Lỗi khi lưu danh sách lớp');
-      }
     } catch (err) {
-      console.error('Error saving roster:', err);
-      alert('Lỗi kết nối máy chủ');
+      console.warn('Background sync failed, but roster is saved locally:', err);
     } finally {
       setIsSavingRoster(false);
+      setNewClassName('');
+      setRawStudentNamesText('');
+      setEditingRosterId(null);
+      setActiveTab('classTracking');
+      setTrackingClass(targetClassName);
     }
   };
 
@@ -479,17 +621,31 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   // Handle Delete Roster
   const handleDeleteRoster = async (id: string) => {
     if (!confirm('Bạn có chắc chắn muốn xóa danh sách lớp này?')) return;
+    
+    // 1. Immediately delete from local state and LocalStorage
+    setRosters(prev => prev.filter(r => r.id !== id));
+    try {
+      const localRostersRaw = localStorage.getItem('teacher_local_rosters');
+      if (localRostersRaw) {
+        const localList: ClassRoster[] = JSON.parse(localRostersRaw);
+        if (Array.isArray(localList)) {
+          const filtered = localList.filter(r => r.id !== id);
+          localStorage.setItem('teacher_local_rosters', JSON.stringify(filtered));
+        }
+      }
+    } catch (localErr) {
+      console.warn('Error deleting from local storage:', localErr);
+    }
+
+    // 2. Sync deletion to server
     try {
       const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
       const tId = getTeacherId(undefined, email);
-      const res = await fetch(`/api/class-rosters/${id}?teacherId=${encodeURIComponent(tId)}&teacherEmail=${encodeURIComponent(email)}`, {
+      await fetch(`/api/class-rosters/${id}?teacherId=${encodeURIComponent(tId)}&teacherEmail=${encodeURIComponent(email)}`, {
         method: 'DELETE'
       });
-      if (res.ok) {
-        setRosters(prev => prev.filter(r => r.id !== id));
-      }
     } catch (err) {
-      console.error('Error deleting roster:', err);
+      console.warn('Server delete failed, but deleted locally:', err);
     }
   };
 
@@ -537,6 +693,29 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   // Handle Export Excel (Submissions or Class Tracking)
   const handleExportExcel = () => {
     if (activeTab === 'classTracking') {
+      if (trackingSubTab === 'matrix') {
+        const matrixData = classMatrixData.students.map((st, idx) => {
+          const row: Record<string, any> = {
+            "STT": idx + 1,
+            "Họ và tên học sinh": st.name,
+            "Lớp": trackingClass
+          };
+          classMatrixData.quizzes.forEach((qTitle, qIdx) => {
+            const sc = st.quizScores[qTitle];
+            row[`[Bài ${qIdx + 1}] ${qTitle}`] = sc !== null ? sc.score : "Chưa làm";
+          });
+          row["Số bài đã làm"] = `${st.completedCount}/${st.totalQuizzes}`;
+          row["Điểm TB chung"] = st.avgScore !== null ? st.avgScore : "---";
+          return row;
+        });
+
+        const ws = XLSX.utils.json_to_sheet(matrixData);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, `TongHop_Lop_${trackingClass}`);
+        XLSX.writeFile(wb, `Bang_Diem_Tong_Hop_Cac_Bai_Lop_${trackingClass}_${Date.now()}.xlsx`);
+        return;
+      }
+
       // Export Class Roster Tracking
       const doneData = classTrackingAnalysis.doneStudents.map((s, idx) => {
         const dateStr = new Date(s.submittedAt).toLocaleString('vi-VN');
@@ -610,38 +789,67 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
 
   // Handle delete submission
   const handleDeleteSubmission = async (id: string) => {
+    // 1. Immediately delete from local state and LocalStorage
+    setSubmissions(prev => prev.filter(s => s.id !== id));
+    if (viewingDetailSubmission && viewingDetailSubmission.id === id) {
+      setViewingDetailSubmission(null);
+    }
+
+    try {
+      const localSubRaw = localStorage.getItem('teacher_local_submissions');
+      if (localSubRaw) {
+        const localList: StudentSubmission[] = JSON.parse(localSubRaw);
+        if (Array.isArray(localList)) {
+          const filtered = localList.filter(s => s.id !== id);
+          localStorage.setItem('teacher_local_submissions', JSON.stringify(filtered));
+        }
+      }
+    } catch (e) {
+      console.warn('Error updating local submissions:', e);
+    }
+
+    // 2. Sync to server in background
     try {
       const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
       const tId = getTeacherId(undefined, email);
-      const res = await fetch(`/api/teacher-submissions/${id}?teacherId=${encodeURIComponent(tId)}&teacherEmail=${encodeURIComponent(email)}`, {
+      await fetch(`/api/teacher-submissions/${id}?teacherId=${encodeURIComponent(tId)}&teacherEmail=${encodeURIComponent(email)}`, {
         method: 'DELETE'
       });
-      if (res.ok) {
-        setSubmissions(prev => prev.filter(s => s.id !== id));
-        if (viewingDetailSubmission && viewingDetailSubmission.id === id) {
-          setViewingDetailSubmission(null);
-        }
-      }
     } catch (err) {
-      console.error('Error deleting submission:', err);
+      console.warn('Error deleting submission from server:', err);
     }
   };
 
   // Handle clear all
   const handleClearAll = async () => {
+    // 1. Immediately clear from local state and LocalStorage
+    setSubmissions([]);
+    setShowConfirmClear(false);
+    setViewingDetailSubmission(null);
+
+    try {
+      const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+      const localSubRaw = localStorage.getItem('teacher_local_submissions');
+      if (localSubRaw) {
+        const localList: StudentSubmission[] = JSON.parse(localSubRaw);
+        if (Array.isArray(localList)) {
+          const filtered = localList.filter(s => (s.teacherEmail || '').toLowerCase().trim() !== email);
+          localStorage.setItem('teacher_local_submissions', JSON.stringify(filtered));
+        }
+      }
+    } catch (e) {
+      console.warn('Error clearing local submissions:', e);
+    }
+
+    // 2. Sync to server in background
     try {
       const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
       const tId = getTeacherId(undefined, email);
-      const res = await fetch(`/api/teacher-submissions/clear-all?teacherId=${encodeURIComponent(tId)}&teacherEmail=${encodeURIComponent(email)}`, {
+      await fetch(`/api/teacher-submissions/clear-all?teacherId=${encodeURIComponent(tId)}&teacherEmail=${encodeURIComponent(email)}`, {
         method: 'DELETE'
       });
-      if (res.ok) {
-        setSubmissions([]);
-        setShowConfirmClear(false);
-        setViewingDetailSubmission(null);
-      }
     } catch (err) {
-      console.error('Error clearing submissions:', err);
+      console.warn('Error clearing submissions on server:', err);
     }
   };
 
@@ -1208,9 +1416,9 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
               </div>
             </div>
 
-            {/* Sub-Tabs: Đã làm vs Chưa làm */}
+            {/* Sub-Tabs: Đã làm vs Chưa làm vs Bảng Điểm Tổng Hợp */}
             <div className="p-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between flex-wrap gap-2">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <button
                   onClick={() => setTrackingSubTab('done')}
                   className={`px-4 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all ${
@@ -1234,6 +1442,19 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
                   <UserX className="w-4 h-4" />
                   <span>Danh sách CHƯA LÀM ({classTrackingAnalysis.notDoneCount} em)</span>
                 </button>
+
+                <button
+                  onClick={() => setTrackingSubTab('matrix')}
+                  className={`px-4 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all ${
+                    trackingSubTab === 'matrix'
+                      ? 'bg-purple-600 text-white shadow-sm'
+                      : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-200'
+                  }`}
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>Bảng Điểm Tổng Hợp ({classMatrixData.quizzes.length} bài)</span>
+                  <span className="bg-amber-400 text-amber-950 text-[9px] px-1.5 py-0.2 rounded-full font-black">Mới</span>
+                </button>
               </div>
 
               {trackingSubTab === 'notDone' && classTrackingAnalysis.notDoneStudents.length > 0 && (
@@ -1245,11 +1466,131 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
                   <span>{copiedNotDone ? 'Đã sao chép để dán Zalo!' : 'Sao chép DS Chưa nộp (gửi Zalo)'}</span>
                 </button>
               )}
+
+              {trackingSubTab === 'matrix' && (
+                <button
+                  onClick={handleExportExcel}
+                  className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all active:scale-95"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>Xuất Excel Bảng Điểm Tổng Hợp</span>
+                </button>
+              )}
             </div>
 
             {/* List Area */}
             <div className="flex-1 p-4 overflow-y-auto">
-              {trackingSubTab === 'done' ? (
+              {trackingSubTab === 'matrix' ? (
+                /* BẢNG ĐIỂM TỔNG HỢP MATRIX */
+                classMatrixData.students.length === 0 ? (
+                  <div className="h-48 flex flex-col items-center justify-center text-center p-4">
+                    <Users className="w-12 h-12 text-slate-300 mb-2" />
+                    <p className="text-xs font-bold text-slate-600">Chưa có dữ liệu học sinh trong lớp {trackingClass}</p>
+                    <button
+                      onClick={() => setActiveTab('manageRosters')}
+                      className="mt-3 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center gap-1"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Nhập danh sách lớp {trackingClass}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="p-3 bg-purple-50 border border-purple-200 rounded-2xl flex items-center justify-between text-xs text-purple-900">
+                      <div className="flex items-center gap-2">
+                        <Award className="w-4 h-4 text-purple-600 shrink-0" />
+                        <span>Bảng điểm theo dõi toàn diện lớp <strong>{trackingClass}</strong> qua <strong>{classMatrixData.quizzes.length}</strong> bài tập / đợt giao. Nhận diện học sinh tự động mà không cần nhập lại danh sách.</span>
+                      </div>
+                    </div>
+
+                    <div className="border border-slate-200 rounded-2xl overflow-x-auto shadow-xs">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200 select-none">
+                          <tr>
+                            <th className="py-2.5 px-3 text-center w-12 sticky left-0 bg-slate-50 z-10">STT</th>
+                            <th className="py-2.5 px-4 sticky left-12 bg-slate-50 z-10 min-w-[160px]">Họ và tên học sinh</th>
+                            {classMatrixData.quizzes.map((qTitle, qIdx) => (
+                              <th key={qTitle} className="py-2.5 px-3 text-center min-w-[130px]" title={qTitle}>
+                                <div className="text-[10px] text-purple-700 font-bold uppercase">Bài {qIdx + 1}</div>
+                                <div className="truncate max-w-[130px]">{qTitle}</div>
+                              </th>
+                            ))}
+                            <th className="py-2.5 px-3 text-center bg-indigo-50/70 text-indigo-900 min-w-[90px]">Số bài đã làm</th>
+                            <th className="py-2.5 px-3 text-center bg-emerald-50/70 text-emerald-900 min-w-[90px]">Điểm TB chung</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {classMatrixData.students.map((st, idx) => {
+                            let avgBadge = 'bg-slate-100 text-slate-500';
+                            if (st.avgScore !== null) {
+                              if (st.avgScore >= 8.5) avgBadge = 'bg-emerald-100 text-emerald-800 font-black';
+                              else if (st.avgScore >= 6.5) avgBadge = 'bg-blue-100 text-blue-800 font-bold';
+                              else if (st.avgScore >= 5.0) avgBadge = 'bg-amber-100 text-amber-800 font-bold';
+                              else avgBadge = 'bg-rose-100 text-rose-800 font-bold';
+                            }
+
+                            return (
+                              <tr key={idx} className="hover:bg-purple-50/20 transition-colors">
+                                <td className="py-2 px-3 text-center font-mono text-slate-400 sticky left-0 bg-white z-10">
+                                  {idx + 1}
+                                </td>
+                                <td className="py-2 px-4 font-bold text-slate-800 sticky left-12 bg-white z-10">
+                                  {st.name}
+                                </td>
+                                {classMatrixData.quizzes.map(qTitle => {
+                                  const item = st.quizScores[qTitle];
+                                  if (!item) {
+                                    return (
+                                      <td key={qTitle} className="py-2 px-3 text-center">
+                                        <span className="inline-block px-2 py-0.5 rounded-md text-[10px] text-slate-400 bg-slate-50 border border-slate-100 font-medium">
+                                          Chưa làm
+                                        </span>
+                                      </td>
+                                    );
+                                  }
+
+                                  let scoreColor = 'text-rose-600 bg-rose-50 border-rose-200';
+                                  if (item.score >= 8.5) scoreColor = 'text-emerald-700 bg-emerald-50 border-emerald-200 font-black';
+                                  else if (item.score >= 6.5) scoreColor = 'text-blue-700 bg-blue-50 border-blue-200 font-bold';
+                                  else if (item.score >= 5.0) scoreColor = 'text-amber-700 bg-amber-50 border-amber-200 font-bold';
+
+                                  return (
+                                    <td key={qTitle} className="py-2 px-3 text-center">
+                                      <div className="flex items-center justify-center gap-1">
+                                        <span className={`inline-block px-2 py-0.5 rounded-lg text-xs border ${scoreColor}`}>
+                                          {item.score.toFixed(1)} đ
+                                        </span>
+                                        {item.submission && (
+                                          <button
+                                            onClick={() => setViewingDetailSubmission(item.submission!)}
+                                            className="p-1 text-slate-400 hover:text-blue-600 rounded"
+                                            title="Xem chi tiết bài làm"
+                                          >
+                                            <Eye className="w-3 h-3" />
+                                          </button>
+                                        )}
+                                      </div>
+                                    </td>
+                                  );
+                                })}
+                                <td className="py-2 px-3 text-center font-bold text-slate-700 bg-indigo-50/30">
+                                  <span className={`px-2 py-0.5 rounded-full text-xs ${st.completedCount === st.totalQuizzes ? 'text-emerald-700 bg-emerald-100 font-bold' : 'text-slate-600 bg-slate-100'}`}>
+                                    {st.completedCount}/{st.totalQuizzes}
+                                  </span>
+                                </td>
+                                <td className="py-2 px-3 text-center bg-emerald-50/30">
+                                  <span className={`px-2.5 py-0.5 rounded-lg text-xs ${avgBadge}`}>
+                                    {st.avgScore !== null ? `${st.avgScore.toFixed(1)} đ` : '---'}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )
+              ) : trackingSubTab === 'done' ? (
                 classTrackingAnalysis.doneStudents.length === 0 ? (
                   <div className="h-48 flex flex-col items-center justify-center text-center p-4">
                     <UserX className="w-12 h-12 text-slate-300 mb-2" />
@@ -1406,26 +1747,57 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
         {/* TAB 3: MANAGE CLASS ROSTERS */}
         {activeTab === 'manageRosters' && (
           <div className="flex-1 p-5 overflow-y-auto space-y-6">
+
+            {/* Permanent Storage Notice Banner */}
+            <div className="p-4 bg-linear-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-3xl flex items-start gap-3 shadow-xs">
+              <div className="p-2 bg-indigo-600 text-white rounded-2xl shrink-0 mt-0.5">
+                <CheckCircle2 className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="text-xs font-bold text-indigo-950">
+                  Lưu trữ danh sách lớp vĩnh viễn (Chỉ nhập 1 lần duy nhất)
+                </h4>
+                <p className="text-xs text-indigo-800 leading-relaxed">
+                  Thầy/cô chỉ cần nhập danh sách lớp 1 lần duy nhất. Tất cả các đề thi, bài tập trắc nghiệm giao cho lớp đó trong tương lai sẽ <strong>tự động nhận diện và phân loại học sinh</strong> (đã nộp / chưa nộp, tính điểm trung bình) mà <strong>không cần phải nhập lại</strong> danh sách của lớp.
+                </p>
+              </div>
+            </div>
             
             {/* Create / Edit Form */}
             <div className="p-5 bg-indigo-50/60 border border-indigo-200 rounded-3xl space-y-4 shadow-xs">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between flex-wrap gap-2">
                 <h3 className="text-sm font-bold text-indigo-950 flex items-center gap-2">
                   <Plus className="w-4 h-4 text-indigo-600" />
                   <span>{editingRosterId ? 'Chỉnh Sửa Danh Sách Lớp' : 'Thêm / Nhập Danh Sách Sĩ Số Lớp Mới'}</span>
                 </h3>
-                {editingRosterId && (
-                  <button
-                    onClick={() => {
-                      setEditingRosterId(null);
-                      setNewClassName('');
-                      setRawStudentNamesText('');
-                    }}
-                    className="text-xs text-slate-500 hover:text-slate-700 underline"
-                  >
-                    Hủy chỉnh sửa
-                  </button>
-                )}
+                <div className="flex items-center gap-2">
+                  {!editingRosterId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewClassName('12A1');
+                        setRawStudentNamesText(
+                          "Nguyễn Văn An\nTrần Thị Bích\nLê Hoàng Cường\nPhạm Minh Dũng\nHoàng Thu Dung\nĐặng Quốc Đạt\nVũ Hải Đăng\nBùi Phương Giang\nNgô Gia Huy\nĐỗ Khánh Huyền\nTrịnh Tuấn Kiệt\nDương Bích Lan\nLý Gia Linh\nMai Nhật Minh\nPhan Thảo My\nNguyễn Bảo Nam\nTrần Yến Nhi\nLê Đức Phong\nPhạm Quỳnh Như\nHoàng Thế Quân\nĐặng Thục Quyên\nVũ Minh Sang\nBùi Ánh Tuyết\nNgô Thanh Tùng\nĐỗ Cẩm Uyên\nTrịnh Văn Việt\nDương Hải Yến\nLý Hồng Anh\nMai Tuấn Dũng\nPhan Hoàng Long"
+                        );
+                      }}
+                      className="text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-white px-3 py-1 rounded-xl border border-indigo-200 shadow-2xs transition-all active:scale-95"
+                    >
+                      ✨ Dán nhanh DS mẫu (Lớp 12A1 - 30 HS)
+                    </button>
+                  )}
+                  {editingRosterId && (
+                    <button
+                      onClick={() => {
+                        setEditingRosterId(null);
+                        setNewClassName('');
+                        setRawStudentNamesText('');
+                      }}
+                      className="text-xs text-slate-500 hover:text-slate-700 underline"
+                    >
+                      Hủy chỉnh sửa
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1439,14 +1811,19 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
                     className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white outline-none focus:ring-2 focus:ring-indigo-500 font-bold"
                   />
                   <p className="text-[10px] text-slate-500 mt-1.5 leading-relaxed">
-                    💡 Học sinh khi làm bài nhập lớp này sẽ tự động được khớp với danh sách sĩ số để kiểm soát.
+                    💡 Học sinh khi làm bài nhập tên lớp này sẽ tự động được hệ thống đối soát theo danh sách sĩ số.
                   </p>
                 </div>
 
                 <div className="md:col-span-2">
-                  <label className="text-xs font-bold text-slate-700 block mb-1">
-                    Danh Sách Tên Học Sinh (Dán danh sách từ Word/Excel - mỗi dòng 1 tên):
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-bold text-slate-700 block">
+                      Danh Sách Tên Học Sinh (Dán danh sách từ Word/Excel - mỗi dòng 1 tên):
+                    </label>
+                    <span className="text-[10px] text-slate-500">
+                      Tự động lọc bỏ số thứ tự STT (1., 2-, ...)
+                    </span>
+                  </div>
                   <textarea
                     rows={6}
                     value={rawStudentNamesText}
@@ -1482,50 +1859,59 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {rosters.map(roster => (
-                    <div key={roster.id} className="p-4 bg-white rounded-2xl border border-slate-200 shadow-xs hover:shadow-md transition-all flex flex-col justify-between space-y-3">
-                      <div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-base font-black text-slate-900">Lớp {roster.className}</span>
-                          <span className="bg-indigo-100 text-indigo-800 text-xs font-bold px-2.5 py-0.5 rounded-full">
-                            {roster.studentNames.length} học sinh
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-500 mt-1 line-clamp-2">
-                          {roster.studentNames.slice(0, 5).join(', ')}{roster.studentNames.length > 5 ? '...' : ''}
-                        </p>
-                      </div>
+                  {rosters.map(roster => {
+                    const classSubsCount = submissions.filter(s => 
+                      s.studentClass && s.studentClass.toLowerCase().trim() === roster.className.toLowerCase().trim()
+                    ).length;
 
-                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
-                        <button
-                          onClick={() => {
-                            setTrackingClass(roster.className);
-                            setActiveTab('classTracking');
-                          }}
-                          className="text-xs font-bold text-purple-600 hover:text-purple-800 flex items-center gap-1"
-                        >
-                          Kiểm soát bài làm <ChevronRight className="w-3.5 h-3.5" />
-                        </button>
+                    return (
+                      <div key={roster.id} className="p-4 bg-white rounded-2xl border border-slate-200 shadow-xs hover:shadow-md transition-all flex flex-col justify-between space-y-3">
+                        <div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-base font-black text-slate-900">Lớp {roster.className}</span>
+                            <span className="bg-indigo-100 text-indigo-800 text-xs font-bold px-2.5 py-0.5 rounded-full">
+                              {roster.studentNames.length} học sinh
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-500 mt-1 line-clamp-2">
+                            {roster.studentNames.slice(0, 5).join(', ')}{roster.studentNames.length > 5 ? '...' : ''}
+                          </p>
+                          <div className="mt-2 text-[10px] text-slate-400">
+                            Đã ghi nhận: <strong className="text-slate-600">{classSubsCount}</strong> lượt nộp bài
+                          </div>
+                        </div>
 
-                        <div className="flex items-center gap-1">
+                        <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
                           <button
-                            onClick={() => handleEditRoster(roster)}
-                            className="p-1 text-slate-400 hover:text-indigo-600 rounded"
-                            title="Sửa danh sách"
+                            onClick={() => {
+                              setTrackingClass(roster.className);
+                              setActiveTab('classTracking');
+                            }}
+                            className="text-xs font-bold text-purple-600 hover:text-purple-800 flex items-center gap-1"
                           >
-                            <Edit3 className="w-3.5 h-3.5" />
+                            Kiểm soát bài làm <ChevronRight className="w-3.5 h-3.5" />
                           </button>
-                          <button
-                            onClick={() => handleDeleteRoster(roster.id)}
-                            className="p-1 text-slate-400 hover:text-rose-600 rounded"
-                            title="Xóa lớp"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleEditRoster(roster)}
+                              className="p-1 text-slate-400 hover:text-indigo-600 rounded"
+                              title="Sửa danh sách"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteRoster(roster.id)}
+                              className="p-1 text-slate-400 hover:text-rose-600 rounded"
+                              title="Xóa lớp"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

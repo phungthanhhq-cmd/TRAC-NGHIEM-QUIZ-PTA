@@ -8,6 +8,7 @@ export interface SharedQuizPackage {
   grade?: string;
   teacherId?: string;
   teacherEmail?: string;
+  targetClass?: string;
   isSharedLink?: boolean;
   isError?: boolean;
   errorMessage?: string;
@@ -152,7 +153,8 @@ export function createSelfContainedQuizUrl(
   grade?: string,
   targetOrigin?: string,
   teacherId?: string,
-  teacherEmail?: string
+  teacherEmail?: string,
+  targetClass?: string
 ): string {
   try {
     const currentTeacherEmail = teacherEmail || getTeacherEmail();
@@ -191,7 +193,11 @@ export function createSelfContainedQuizUrl(
     // Clean trailing slashes or hashes
     base = base.replace(/[#/]+$/, '');
     
-    return `${base}/#quiz=${compressed}`;
+    let url = `${base}/#quiz=${compressed}`;
+    if (targetClass && targetClass.trim()) {
+      url += `&class=${encodeURIComponent(targetClass.trim())}`;
+    }
+    return url;
   } catch (err) {
     console.error("Failed to encode ultra-compact quiz URL", err);
     return "";
@@ -210,6 +216,14 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
   const hasStudentParam = hash.includes('q=') || hash.includes('quiz=') || search.includes('q=') || search.includes('quiz=');
 
   if (!hasStudentParam) return null;
+
+  let extractedClass = '';
+  if (hash.includes('class=')) {
+    extractedClass = decodeURIComponent(hash.split('class=')[1]?.split('&')[0] || '');
+  } else if (search.includes('class=')) {
+    const urlParams = new URLSearchParams(search);
+    extractedClass = urlParams.get('class') || '';
+  }
 
   try {
     // 1. Check self-contained payload #quiz=COMPRESSED_DATA
@@ -271,6 +285,7 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
             grade: tuple[3],
             teacherId: tuple[5],
             teacherEmail: tuple[6] ? tuple[6].trim().toLowerCase() : undefined,
+            targetClass: extractedClass ? extractedClass.trim() : undefined,
             isSharedLink: true,
             questions: questionsList
           };
@@ -307,6 +322,7 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
             subject: ultra.s,
             grade: ultra.g,
             teacherId: ultra.tid,
+            targetClass: extractedClass ? extractedClass.trim() : undefined,
             isSharedLink: true,
             questions: questionsList
           };

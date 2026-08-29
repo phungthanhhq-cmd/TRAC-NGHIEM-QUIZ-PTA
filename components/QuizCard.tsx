@@ -65,12 +65,21 @@ const QuizCard: React.FC<QuizCardProps> = ({ question, index, onDelete, onUpdate
         </div>
 
         <div className="mb-6">
-          <label className="block text-sm font-medium text-slate-700 mb-1">Nội dung câu hỏi</label>
+          <div className="flex justify-between items-center mb-1">
+            <label className="block text-sm font-medium text-slate-700">Nội dung câu hỏi</label>
+            <span className="text-xs text-slate-500">Tự động định dạng số mũ và công thức toán (ví dụ: $-4x^3y^2$, $x^2$)</span>
+          </div>
           <textarea 
             value={editedQuestion.question_content}
             onChange={(e) => setEditedQuestion({...editedQuestion, question_content: e.target.value})}
-            className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary/50 outline-none min-h-[100px]"
+            className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary/50 outline-none min-h-[80px]"
           />
+          {editedQuestion.question_content && (
+            <div className="mt-2 p-2.5 bg-blue-50/70 border border-blue-100 rounded-lg text-sm">
+              <span className="text-xs font-semibold text-blue-700 block mb-1">Xem trước hiển thị công thức:</span>
+              <MathRenderer text={editedQuestion.question_content} />
+            </div>
+          )}
         </div>
 
         <div className="space-y-3">
@@ -89,15 +98,22 @@ const QuizCard: React.FC<QuizCardProps> = ({ question, index, onDelete, onUpdate
               <span className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-full font-bold text-sm bg-slate-100 text-slate-700 border border-slate-300">
                 {opt.key}
               </span>
-              <textarea 
-                value={opt.text}
-                onChange={(e) => {
-                  const newOptions = [...editedQuestion.options];
-                  newOptions[optIndex].text = e.target.value;
-                  setEditedQuestion({...editedQuestion, options: newOptions});
-                }}
-                className="flex-grow p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary/50 outline-none min-h-[60px]"
-              />
+              <div className="flex-grow space-y-1">
+                <textarea 
+                  value={opt.text}
+                  onChange={(e) => {
+                    const newOptions = [...editedQuestion.options];
+                    newOptions[optIndex].text = e.target.value;
+                    setEditedQuestion({...editedQuestion, options: newOptions});
+                  }}
+                  className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary/50 outline-none min-h-[50px]"
+                />
+                {opt.text && (opt.text.includes('^') || opt.text.includes('$') || opt.text.includes('\\')) && (
+                  <div className="text-xs text-slate-600 bg-slate-50 px-2 py-1 rounded border border-slate-200">
+                    <MathRenderer text={opt.text} />
+                  </div>
+                )}
+              </div>
             </div>
           ))}
         </div>

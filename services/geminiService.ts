@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { QuizConfig, QuizQuestion } from "../types";
 import { extractTextFromDocx } from "../utils/fileProcessor";
+import { preprocessMathText } from "../utils/mathUtils";
 
 export const DEFAULT_MODEL = "gemini-2.5-flash";
 export const CANDIDATE_MODELS = [
@@ -17,21 +18,21 @@ Nhiệm vụ của bạn là tạo ra các câu hỏi trắc nghiệm khách qua
 YÊU CẦU BẮT BUỘC:
 1. Nội dung câu hỏi phải chính xác về mặt kiến thức, phù hợp với Lớp và Môn học được yêu cầu.
 2. Phân loại mức độ nhận thức (Bloom) đúng theo cấu hình.
-3. Sử dụng định dạng LaTeX cho TẤT CẢ các công thức toán học, đặt trong dấu $ đơn (ví dụ: $x^2$). TUYỆT ĐỐI KHÔNG dùng $$ (hai dấu $).
+3. ĐỊNH DẠNG CÔNG THỨC TOÁN & SỐ MŨ (CỰC KỲ QUAN TRỌNG):
+   - Mọi biểu thức toán học, đơn thức, đa thức, số mũ, lũy thừa, căn thức, phân số, phương trình, hệ phương trình, biến số, tọa độ, đơn vị đo (cm^2, m^3) BẮT BUỘC phải đặt trong cặp dấu $ đơn.
+   - Ví dụ đúng: $-4x^3y^2$, $x^2 + 2x - 3 = 0$, $2^3 = 8$, $\\frac{1}{2}$, $\\sqrt{x+1}$, $A(1; 2)$, $25\\text{ cm}^2$.
+   - TUYỆT ĐỐI KHÔNG viết dạng trần như -4x^3y^2 hay x^2 hay 2^3 mà không có dấu $ bao quanh.
+   - TUYỆT ĐỐI KHÔNG dùng $$ (hai dấu $).
 4. Ngôn ngữ: Tiếng Việt chuẩn mực sư phạm.
 `;
 
 /**
- * Helper function to normalize LaTeX delimiters.
- * Ensures all math blocks use single $ delimiters for compatibility.
+ * Helper function to normalize LaTeX delimiters and math expressions.
+ * Ensures all math blocks and exponents use single $ delimiters for perfect KaTeX rendering.
  */
 const normalizeMathDelimiters = (text: string): string => {
   if (!text) return "";
-  let cleaned = text;
-  cleaned = cleaned.replace(/\$\$/g, '$');
-  cleaned = cleaned.replace(/\\\[/g, '$').replace(/\\\]/g, '$');
-  cleaned = cleaned.replace(/\\\(/g, '$').replace(/\\\)/g, '$');
-  return cleaned;
+  return preprocessMathText(text);
 };
 
 /**

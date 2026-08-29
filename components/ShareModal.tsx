@@ -52,14 +52,17 @@ const ShareModal: React.FC<ShareModalProps> = ({
   const [teacherEmail, setTeacherEmailState] = useState<string>(() => getTeacherEmail());
   const [isEditingEmail, setIsEditingEmail] = useState<boolean>(false);
   const [emailInput, setEmailInput] = useState<string>('');
+  const [selectedClass, setSelectedClass] = useState<string>('');
+  const [savedRosters, setSavedRosters] = useState<{ className: string; studentNames: string[] }[]>([]);
 
   const quizTitle = lessonName?.trim()
     ? `${subject || 'Môn học'} Lớp ${grade || ''}: ${lessonName.trim()}`
     : `Bài tập ôn tập ${subject || ''} Lớp ${grade || ''}`;
 
-  const regenerateUrl = (domain?: string, email?: string) => {
+  const regenerateUrl = (domain?: string, email?: string, cls?: string) => {
     const targetDomain = domain || customDomain;
     const targetEmail = email || teacherEmail;
+    const targetClass = cls !== undefined ? cls : selectedClass;
     const generatedUrl = createSelfContainedQuizUrl(
       quizTitle,
       questions,
@@ -67,7 +70,8 @@ const ShareModal: React.FC<ShareModalProps> = ({
       grade,
       targetDomain,
       undefined,
-      targetEmail
+      targetEmail,
+      targetClass || undefined
     );
     setShareUrl(generatedUrl);
   };
@@ -84,6 +88,17 @@ const ShareModal: React.FC<ShareModalProps> = ({
       const currentEmail = getTeacherEmail();
       setTeacherEmailState(currentEmail);
 
+      // Load saved rosters from local storage
+      try {
+        const raw = localStorage.getItem('teacher_local_rosters');
+        if (raw) {
+          const list = JSON.parse(raw);
+          if (Array.isArray(list)) {
+            setSavedRosters(list);
+          }
+        }
+      } catch (e) {}
+
       const generatedUrl = createSelfContainedQuizUrl(
         quizTitle,
         questions,
@@ -91,11 +106,12 @@ const ShareModal: React.FC<ShareModalProps> = ({
         grade,
         baseOrigin,
         undefined,
-        currentEmail
+        currentEmail,
+        selectedClass || undefined
       );
       setShareUrl(generatedUrl);
     }
-  }, [isOpen, quizTitle, questions, subject, grade]);
+  }, [isOpen, quizTitle, questions, subject, grade, selectedClass]);
 
   const handleSaveEmail = () => {
     const clean = emailInput.trim().toLowerCase();
@@ -316,6 +332,56 @@ const ShareModal: React.FC<ShareModalProps> = ({
               </button>
             )}
           </div>
+
+          {/* Targeted Class Selection (Optional but super convenient) */}
+          {savedRosters.length > 0 && (
+            <div className="p-3 bg-amber-50/70 border border-amber-200/80 rounded-2xl space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-600" /> Giao cho lớp cụ thể (Tùy chọn):
+                </span>
+                {selectedClass ? (
+                  <span className="text-[11px] font-semibold text-amber-800 bg-amber-200/60 px-2 py-0.5 rounded-md">
+                    Đang chọn: <strong>{selectedClass}</strong>
+                  </span>
+                ) : (
+                  <span className="text-[11px] text-amber-700">
+                    Chung (Học sinh tự nhập lớp)
+                  </span>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1.5 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => setSelectedClass('')}
+                  className={`px-2.5 py-1 rounded-xl text-xs font-medium transition-all ${
+                    !selectedClass
+                      ? 'bg-amber-600 text-white font-bold shadow-xs'
+                      : 'bg-white text-slate-700 hover:bg-amber-100/80 border border-amber-200'
+                  }`}
+                >
+                  Tất cả / Chung
+                </button>
+                {savedRosters.map((r, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => setSelectedClass(r.className)}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-medium transition-all ${
+                      selectedClass.toLowerCase() === r.className.toLowerCase()
+                        ? 'bg-amber-600 text-white font-bold shadow-xs'
+                        : 'bg-white text-slate-700 hover:bg-amber-100/80 border border-amber-200'
+                    }`}
+                  >
+                    {r.className} ({r.studentNames?.length || 0} HS)
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-amber-800 italic">
+                💡 Khi chọn lớp, học sinh mở link sẽ được tự động điền lớp và hiển thị danh sách tên gợi ý để bấm chọn nhanh.
+              </p>
+            </div>
+          )}
 
           {/* DUAL OPTIONS: DIRECT LINK & QR CODE */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

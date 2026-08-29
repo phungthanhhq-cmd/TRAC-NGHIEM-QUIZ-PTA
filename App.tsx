@@ -10,7 +10,7 @@ import StudentQuizView from './components/StudentQuizView';
 import StudentSubmissionsModal from './components/StudentSubmissionsModal';
 import { generateQuizFromContent, checkServerApiStatus } from './services/geminiService';
 import { decodeQuizFromUrl, SharedQuizPackage, getTeacherId, getTeacherEmail } from './utils/shareUtils';
-import { Download, History, BrainCircuit, Copy, Check, Share2, Key, RefreshCw, GraduationCap, Users } from 'lucide-react';
+import { Download, History, BrainCircuit, Share2, Key, RefreshCw, GraduationCap, Users } from 'lucide-react';
 
 const App: React.FC = () => {
   // --- State ---
@@ -30,7 +30,6 @@ const App: React.FC = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [isCopied, setIsCopied] = useState(false);
   
   // Modals and student mode
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
@@ -216,17 +215,6 @@ const App: React.FC = () => {
     XLSX.writeFile(wb, `Quiz_${config.subject}_${Date.now()}.xlsx`);
   };
 
-  const handleCopyJSON = async () => {
-    if (!generatedQuiz) return;
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(generatedQuiz, null, 2));
-      setIsCopied(true);
-      setTimeout(() => setIsCopied(false), 2000);
-    } catch (err) {
-      console.error("Failed to copy JSON", err);
-    }
-  };
-
   const loadHistoryItem = (item: HistoryItem) => {
     // Ensure unique IDs even for history items
     const sanitizedQuestions = item.questions.map((q, index) => ({
@@ -285,6 +273,7 @@ const App: React.FC = () => {
         grade={studentQuizPackage.grade}
         teacherId={studentQuizPackage.teacherId}
         teacherEmail={studentQuizPackage.teacherEmail}
+        targetClass={studentQuizPackage.targetClass}
         isSharedLink={studentQuizPackage.isSharedLink}
         isError={studentQuizPackage.isError}
         errorMessage={studentQuizPackage.errorMessage}
@@ -398,18 +387,6 @@ const App: React.FC = () => {
                                 className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-all shadow-lg shadow-blue-500/30 font-medium text-sm active:scale-95"
                             >
                                 <GraduationCap className="w-4 h-4" /> Bảng điểm HS {submissionCount > 0 ? `(${submissionCount})` : ''}
-                            </button>
-                            <button 
-                                onClick={handleCopyJSON}
-                                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-white transition-all shadow-lg font-medium text-sm backdrop-blur-sm
-                                    ${isCopied 
-                                        ? 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/30' 
-                                        : 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-500/30'
-                                    }
-                                `}
-                            >
-                                {isCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />} 
-                                {isCopied ? "Đã sao chép" : "Copy sang giáo viên đổi mới"}
                             </button>
                             <button 
                                 onClick={handleExportExcel}

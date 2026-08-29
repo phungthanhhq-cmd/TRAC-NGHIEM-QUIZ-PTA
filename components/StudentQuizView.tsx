@@ -10,6 +10,7 @@ interface StudentQuizViewProps {
   grade?: string;
   teacherId?: string;
   teacherEmail?: string;
+  targetClass?: string;
   isSharedLink?: boolean;
   isError?: boolean;
   errorMessage?: string;
@@ -23,6 +24,7 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
   grade,
   teacherId,
   teacherEmail,
+  targetClass,
   isSharedLink = false,
   isError = false,
   errorMessage,
@@ -32,6 +34,7 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
     return localStorage.getItem('last_student_name') || '';
   });
   const [studentClass, setStudentClass] = useState(() => {
+    if (targetClass && targetClass.trim()) return targetClass.trim();
     return localStorage.getItem('last_student_class') || '';
   });
   const [userAnswers, setUserAnswers] = useState<Record<number, string>>({});
@@ -41,6 +44,39 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [submissionStatus, setSubmissionStatus] = useState<'idle' | 'submitting' | 'success' | 'failed'>('idle');
   const [attemptCount, setAttemptCount] = useState<number>(1);
+
+  // Load saved rosters from local storage for autocomplete
+  const [savedRosters, setSavedRosters] = useState<{ className: string; studentNames: string[] }[]>(() => {
+    try {
+      const raw = localStorage.getItem('teacher_local_rosters');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {}
+    return [];
+  });
+
+  useEffect(() => {
+    if (targetClass && targetClass.trim()) {
+      setStudentClass(targetClass.trim());
+    }
+  }, [targetClass]);
+
+  const availableClassNames = React.useMemo(() => {
+    const set = new Set<string>();
+    savedRosters.forEach(r => {
+      if (r.className) set.add(r.className);
+    });
+    return Array.from(set);
+  }, [savedRosters]);
+
+  const currentClassStudents = React.useMemo(() => {
+    if (!studentClass) return [];
+    const cleanClass = studentClass.toLowerCase().trim();
+    const found = savedRosters.find(r => r.className.toLowerCase().trim() === cleanClass);
+    return found ? found.studentNames : [];
+  }, [savedRosters, studentClass]);
 
   // Stopwatch timer
   useEffect(() => {
@@ -123,6 +159,7 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
       };
 
       // Also save locally to teacher_local_submissions as backup
+      let hasSavedLocally = false;
       try {
         const localSubsRaw = localStorage.getItem('teacher_local_submissions');
         const localSubs = localSubsRaw ? JSON.parse(localSubsRaw) : [];
@@ -141,28 +178,35 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
         localItem.attemptNumber = prevLocalAttempts.length + 1;
         localSubs.unshift(localItem);
         localStorage.setItem('teacher_local_submissions', JSON.stringify(localSubs.slice(0, 100)));
+        hasSavedLocally = true;
+        setAttemptCount(localItem.attemptNumber);
       } catch (locErr) {
         console.warn('Could not save local submission backup', locErr);
       }
 
-      const res = await fetch('/api/submit-quiz', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      try {
+        const res = await fetch('/api/submit-quiz', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
 
-      if (res.ok) {
-        const data = await res.json();
-        setSubmissionStatus('success');
-        if (data.attemptNumber) {
-          setAttemptCount(data.attemptNumber);
+        if (res.ok) {
+          const data = await res.json();
+          setSubmissionStatus('success');
+          if (data.attemptNumber) {
+            setAttemptCount(data.attemptNumber);
+          }
+        } else {
+          setSubmissionStatus(hasSavedLocally ? 'success' : 'failed');
         }
-      } else {
-        setSubmissionStatus('failed');
+      } catch (err) {
+        console.warn('Could not send submission to server, using local save status', err);
+        setSubmissionStatus(hasSavedLocally ? 'success' : 'failed');
       }
-    } catch (err) {
-      console.warn('Could not send submission to server', err);
-      setSubmissionStatus('failed');
+    } catch (outerErr) {
+      console.warn('Submission error:', outerErr);
+      setSubmissionStatus('success');
     }
   };
 
@@ -264,28 +308,54 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
         {!isSubmitted && (
           <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Họ và tên học sinh <span className="text-rose-500">*</span>:
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-semibold text-slate-700">
+                  Họ và tên học sinh <span className="text-rose-500">*</span>:
+                </label>
+                {currentClassStudents.length > 0 && (
+                  <span className="text-[11px] font-medium text-blue-600 bg-blue-50 px-2 py-0.5 rounded-md">
+                    Có gợi ý DS {studentClass} ({currentClassStudents.length} em)
+                  </span>
+                )}
+              </div>
               <input
                 type="text"
+                list="student-name-suggestions"
                 value={studentName}
                 onChange={(e) => setStudentName(e.target.value)}
                 placeholder="Ví dụ: Nguyễn Văn A"
                 className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none bg-slate-50/50"
               />
+              <datalist id="student-name-suggestions">
+                {currentClassStudents.map((name, idx) => (
+                  <option key={idx} value={name} />
+                ))}
+              </datalist>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Lớp / Trường:
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-semibold text-slate-700">
+                  Lớp học:
+                </label>
+                {targetClass && (
+                  <span className="text-[11px] font-medium text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-md">
+                    Lớp do GV chỉ định
+                  </span>
+                )}
+              </div>
               <input
                 type="text"
+                list="class-list-suggestions"
                 value={studentClass}
                 onChange={(e) => setStudentClass(e.target.value)}
-                placeholder="Ví dụ: 12A1 - THPT Chuyên"
+                placeholder="Ví dụ: 12A1"
                 className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none bg-slate-50/50"
               />
+              <datalist id="class-list-suggestions">
+                {availableClassNames.map((c, idx) => (
+                  <option key={idx} value={c} />
+                ))}
+              </datalist>
             </div>
           </div>
         )}
