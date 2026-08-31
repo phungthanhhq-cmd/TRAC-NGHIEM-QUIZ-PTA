@@ -234,33 +234,11 @@ async function startServer() {
     }
   });
 
-  // API Route: Teacher retrieves submission records filtered strictly by their teacherEmail or teacherId
+  // API Route: Teacher retrieves submission records
   app.get('/api/teacher-submissions', (req, res) => {
     try {
-      const { teacherId, teacherEmail } = req.query;
-      const tId = typeof teacherId === 'string' ? teacherId.trim() : '';
-      const tEmail = typeof teacherEmail === 'string' ? teacherEmail.trim().toLowerCase() : '';
-
-      if (!tId && !tEmail) {
-        return res.json({ submissions: [] });
-      }
-
-      // Filter submissions belonging strictly to this teacher:
-      const teacherSubs = submissions.filter(s => {
-        if (tEmail) {
-          if (s.teacherEmail) {
-            return s.teacherEmail.toLowerCase() === tEmail;
-          }
-          // Only fallback to teacherId if submission had no email recorded
-          return tId && s.teacherId === tId && s.teacherId !== 'tea_default';
-        }
-        if (tId && tId !== 'tea_default') {
-          return s.teacherId === tId && !s.teacherEmail;
-        }
-        return false;
-      });
-
-      return res.json({ submissions: teacherSubs });
+      // In this applet instance, return all submissions stored in the instance
+      return res.json({ submissions });
     } catch (err) {
       console.error('Error fetching teacher submissions:', err);
       return res.status(500).json({ error: 'Lỗi khi lấy danh sách kết quả học sinh' });
@@ -307,28 +285,7 @@ async function startServer() {
   // API Route: Get class rosters for a teacher
   app.get('/api/class-rosters', (req, res) => {
     try {
-      const { teacherId, teacherEmail } = req.query;
-      const tId = typeof teacherId === 'string' ? teacherId.trim() : '';
-      const tEmail = typeof teacherEmail === 'string' ? teacherEmail.trim().toLowerCase() : '';
-
-      if (!tId && !tEmail) {
-        return res.json({ rosters: [] });
-      }
-
-      const matched = classRosters.filter(r => {
-        if (tEmail) {
-          if (r.teacherEmail) {
-            return r.teacherEmail.toLowerCase() === tEmail;
-          }
-          return tId && r.teacherId === tId && r.teacherId !== 'tea_default';
-        }
-        if (tId && tId !== 'tea_default') {
-          return r.teacherId === tId && !r.teacherEmail;
-        }
-        return false;
-      });
-
-      return res.json({ rosters: matched });
+      return res.json({ rosters: classRosters });
     } catch (err) {
       console.error('Error fetching class rosters:', err);
       return res.status(500).json({ error: 'Lỗi khi lấy danh sách lớp' });

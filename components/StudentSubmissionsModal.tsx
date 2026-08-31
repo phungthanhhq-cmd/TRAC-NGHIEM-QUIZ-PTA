@@ -85,6 +85,11 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   // Detail View of a single submission
   const [viewingDetailSubmission, setViewingDetailSubmission] = useState<StudentSubmission | null>(null);
 
+  // Refresh & Sync state
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<number>(Date.now());
+  const [refreshToast, setRefreshToast] = useState<string | null>(null);
+
   // Class Tracking Filters
   const [trackingQuiz, setTrackingQuiz] = useState<string>('');
   const [trackingClass, setTrackingClass] = useState<string>('');
@@ -99,9 +104,10 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
 
   const teacherId = useMemo(() => getTeacherId(undefined, currentTeacherEmail), [currentTeacherEmail]);
 
-  // Fetch Submissions strictly for a given email
+  // Fetch Submissions strictly (with local & server fallback)
   const fetchSubmissions = async (emailToUse?: string, isBackground = false) => {
-    const targetEmail = (emailToUse !== undefined ? emailToUse : currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+    const validEmail = (typeof emailToUse === 'string' && emailToUse.trim()) ? emailToUse.trim().toLowerCase() : undefined;
+    const targetEmail = (validEmail || currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
     const targetId = getTeacherId(undefined, targetEmail);
 
     if (!isBackground) {
@@ -109,50 +115,34 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
       setError(null);
     }
     try {
-      if (!targetEmail && !targetId) {
-        setSubmissions([]);
-        return;
-      }
-
       const res = await fetch(`/api/teacher-submissions?teacherId=${encodeURIComponent(targetId)}&teacherEmail=${encodeURIComponent(targetEmail)}`);
       
       const contentType = res.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        if (!isBackground) {
-          console.warn('Server returned non-JSON response while fetching submissions');
-        }
-        return;
+      let serverSubs: StudentSubmission[] = [];
+      if (res.ok && contentType.includes('application/json')) {
+        const data = await res.json();
+        serverSubs = data.submissions || [];
       }
-
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        throw new Error(errorData.error || 'Không thể tải danh sách kết quả học sinh');
-      }
-
-      const data = await res.json();
-      const serverSubs: StudentSubmission[] = data.submissions || [];
       
-      // Merge with any locally recorded submissions (matching THIS specific teacher email)
+      // Merge with any locally recorded submissions
       let combined = [...serverSubs];
       try {
         const localSubsRaw = localStorage.getItem('teacher_local_submissions');
         if (localSubsRaw) {
           const localSubs: any[] = JSON.parse(localSubsRaw);
-          localSubs.forEach(loc => {
-            const locEmail = (loc.teacherEmail || '').toLowerCase().trim();
-            if (targetEmail && locEmail && locEmail !== targetEmail) {
-              return; // skip submissions from other accounts
-            }
-            const exists = combined.some(s => 
-              s.id === loc.id || 
-              (s.studentName.toLowerCase() === loc.studentName.toLowerCase() && 
-               s.quizTitle === loc.quizTitle && 
-               Math.abs(s.submittedAt - loc.submittedAt) < 5000)
-            );
-            if (!exists) {
-              combined.push(loc);
-            }
-          });
+          if (Array.isArray(localSubs)) {
+            localSubs.forEach(loc => {
+              const exists = combined.some(s => 
+                s.id === loc.id || 
+                (s.studentName.toLowerCase() === loc.studentName.toLowerCase() && 
+                 s.quizTitle === loc.quizTitle && 
+                 Math.abs(s.submittedAt - loc.submittedAt) < 5000)
+              );
+              if (!exists) {
+                combined.push(loc);
+              }
+            });
+          }
         }
       } catch (e) {
         // ignore parse error
@@ -162,11 +152,13 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
       combined.sort((a, b) => b.submittedAt - a.submittedAt);
       setSubmissions(combined);
       setError(null);
+      return combined;
     } catch (err: any) {
       if (!isBackground) {
         console.error('Error fetching submissions:', err);
         setError(err.message || 'Lỗi khi tải dữ liệu');
       }
+      return [];
     } finally {
       if (!isBackground) {
         setIsLoading(false);
@@ -174,9 +166,10 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     }
   };
 
-  // Fetch Class Rosters strictly for a given email (with offline & local fallback)
+  // Fetch Class Rosters (with offline & local fallback)
   const fetchRosters = async (emailToUse?: string) => {
-    const targetEmail = (emailToUse !== undefined ? emailToUse : currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+    const validEmail = (typeof emailToUse === 'string' && emailToUse.trim()) ? emailToUse.trim().toLowerCase() : undefined;
+    const targetEmail = (validEmail || currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
     const targetId = getTeacherId(undefined, targetEmail);
 
     // 1. First load from local storage
@@ -186,10 +179,7 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
       if (localRostersRaw) {
         const localList: any[] = JSON.parse(localRostersRaw);
         if (Array.isArray(localList)) {
-          combinedRosters = localList.filter(r => {
-            const rEmail = (r.teacherEmail || '').toLowerCase().trim();
-            return targetEmail && rEmail ? rEmail === targetEmail : true;
-          });
+          combinedRosters = [...localList];
         }
       }
     } catch (e) {
@@ -197,32 +187,58 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     }
 
     try {
-      if (targetEmail || targetId) {
-        const res = await fetch(`/api/class-rosters?teacherId=${encodeURIComponent(targetId)}&teacherEmail=${encodeURIComponent(targetEmail)}`);
-        const contentType = res.headers.get('content-type') || '';
-        if (res.ok && contentType.includes('application/json')) {
-          const data = await res.json();
-          const serverRosters: ClassRoster[] = data.rosters || [];
-          
-          // Merge server rosters with local rosters
-          serverRosters.forEach(sr => {
-            const idx = combinedRosters.findIndex(r => r.id === sr.id || (r.className.toLowerCase() === sr.className.toLowerCase()));
-            if (idx >= 0) {
-              combinedRosters[idx] = sr;
-            } else {
-              combinedRosters.push(sr);
-            }
-          });
-          
-          // Update local cache
-          localStorage.setItem('teacher_local_rosters', JSON.stringify(combinedRosters));
-        }
+      const res = await fetch(`/api/class-rosters?teacherId=${encodeURIComponent(targetId)}&teacherEmail=${encodeURIComponent(targetEmail)}`);
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
+        const data = await res.json();
+        const serverRosters: ClassRoster[] = data.rosters || [];
+        
+        // Merge server rosters with local rosters
+        serverRosters.forEach(sr => {
+          const idx = combinedRosters.findIndex(r => r.id === sr.id || (r.className.toLowerCase() === sr.className.toLowerCase()));
+          if (idx >= 0) {
+            combinedRosters[idx] = sr;
+          } else {
+            combinedRosters.push(sr);
+          }
+        });
+        
+        // Update local cache
+        localStorage.setItem('teacher_local_rosters', JSON.stringify(combinedRosters));
       }
     } catch (err) {
       console.warn('Server offline or static deployment, using local rosters cache:', err);
     }
 
     setRosters(combinedRosters);
+    return combinedRosters;
+  };
+
+  // Manual Refresh Handler
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true);
+    setRefreshToast('Đang quét kết quả bài làm mới nhất...');
+    const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+    try {
+      const [subsResult] = await Promise.all([
+        fetchSubmissions(email, false),
+        fetchRosters(email)
+      ]);
+      setLastRefreshedAt(Date.now());
+      const count = Array.isArray(subsResult) ? subsResult.length : submissions.length;
+      if (count > 0) {
+        setRefreshToast(`Đã đồng bộ ${count} bài nộp của học sinh!`);
+      } else {
+        setRefreshToast('Đã kiểm tra: Chưa có lượt nộp bài mới');
+      }
+      setTimeout(() => setRefreshToast(null), 3000);
+    } catch (err) {
+      console.error('Refresh error:', err);
+      setRefreshToast('Lỗi khi làm mới dữ liệu');
+      setTimeout(() => setRefreshToast(null), 3000);
+    } finally {
+      setTimeout(() => setIsRefreshing(false), 500);
+    }
   };
 
   useEffect(() => {
@@ -924,27 +940,34 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2 self-end sm:self-center">
+            {refreshToast && (
+              <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-xl border border-emerald-200 shadow-2xs animate-in fade-in slide-in-from-right duration-200">
+                ✅ {refreshToast}
+              </span>
+            )}
             <button
               onClick={() => setShowGuide(!showGuide)}
-              className="px-3 py-2 rounded-xl text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 transition-all flex items-center gap-1.5"
+              className="px-3 py-2 rounded-xl text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 transition-all flex items-center gap-1.5 active:scale-95"
             >
               <AlertCircle className="w-4 h-4 text-blue-600" />
               <span>{showGuide ? 'Đóng hướng dẫn' : '💡 Cách đồng bộ'}</span>
             </button>
             <button
-              onClick={() => {
-                fetchSubmissions(false);
-                fetchRosters();
-              }}
-              disabled={isLoading}
-              className="p-2.5 rounded-xl text-slate-600 hover:bg-white hover:text-blue-600 border border-slate-200 transition-all shadow-xs"
-              title="Làm mới dữ liệu ngay"
+              onClick={handleManualRefresh}
+              disabled={isRefreshing || isLoading}
+              className={`px-3 py-2 rounded-xl border text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 active:scale-95 cursor-pointer ${
+                isRefreshing || isLoading
+                  ? 'bg-blue-50 text-blue-700 border-blue-300 ring-2 ring-blue-300'
+                  : 'text-slate-700 bg-white hover:bg-blue-50 hover:text-blue-700 border-slate-200 hover:border-blue-300'
+              }`}
+              title="Nhấp để quét và cập nhật ngay bài nộp mới nhất từ học sinh"
             >
-              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin text-blue-600' : ''}`} />
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing || isLoading ? 'animate-spin text-blue-600' : 'text-slate-500'}`} />
+              <span>{isRefreshing || isLoading ? 'Đang đồng bộ...' : 'Làm mới'}</span>
             </button>
             <button
               onClick={onClose}
-              className="p-2.5 rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
+              className="p-2 rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
             >
               <X className="w-5 h-5" />
             </button>
@@ -1184,12 +1207,20 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
                     <p className="text-xs text-slate-500 mt-1 leading-relaxed">
                       Hãy gửi link bài tập cho học sinh. Khi học sinh làm xong và bấm "Nộp bài", kết quả sẽ tự động lưu và hiển thị tại đây theo thời gian thực.
                     </p>
-                    <div className="mt-4 flex items-center justify-center gap-2">
+                    <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+                      <button
+                        onClick={handleManualRefresh}
+                        disabled={isRefreshing || isLoading}
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing || isLoading ? 'animate-spin' : ''}`} />
+                        <span>{isRefreshing || isLoading ? 'Đang đồng bộ...' : 'Làm Mới & Quét Bài Nộp'}</span>
+                      </button>
                       <button
                         onClick={() => setActiveTab('manageRosters')}
-                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 transition-all active:scale-95"
+                        className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all active:scale-95"
                       >
-                        <Plus className="w-3.5 h-3.5" /> Thêm Danh Sách Lớp Để Kiểm Soát
+                        <Plus className="w-3.5 h-3.5" /> Quản Lý Danh Sách Lớp
                       </button>
                     </div>
                   </div>
