@@ -8,7 +8,6 @@ export const CANDIDATE_MODELS = [
   "gemini-3.8-flash",
   "gemini-flash-latest",
   "gemini-3.1-flash-lite",
-  "gemini-3.7-flash",
   "gemini-2.5-flash"
 ];
 

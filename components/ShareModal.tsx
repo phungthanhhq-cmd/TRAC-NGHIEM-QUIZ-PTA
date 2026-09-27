@@ -35,6 +35,33 @@ interface ShareModalProps {
   onOpenStudentView: () => void;
 }
 
+class QrErrorBoundary extends React.Component<{ fallbackValue: string; size: number; id?: string; includeMargin?: boolean; children: React.ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidUpdate(prevProps: { fallbackValue: string }) {
+    if (prevProps.fallbackValue !== this.props.fallbackValue && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+  render() {
+    if (this.state.hasError) {
+      const safeFallback = (this.props.fallbackValue || 'https://giaoviendoimoi.com').slice(0, 500);
+      return (
+        <QRCodeSVG
+          id={this.props.id}
+          value={safeFallback}
+          size={this.props.size}
+          level="L"
+          includeMargin={this.props.includeMargin}
+        />
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const ShareModal: React.FC<ShareModalProps> = ({
   isOpen,
   onClose,
@@ -46,6 +73,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const [shareUrl, setShareUrl] = useState<string>('');
+  const [compactQrUrl, setCompactQrUrl] = useState<string>('');
   const [shortShareUrl, setShortShareUrl] = useState<string>('');
   const [isFullScreenQR, setIsFullScreenQR] = useState<boolean>(false);
   const [customDomain, setCustomDomain] = useState<string>('');
@@ -72,9 +100,22 @@ const ShareModal: React.FC<ShareModalProps> = ({
       targetDomain,
       undefined,
       targetEmail,
-      targetClass || undefined
+      targetClass || undefined,
+      false
+    );
+    const compactUrl = createSelfContainedQuizUrl(
+      quizTitle,
+      questions,
+      subject,
+      grade,
+      targetDomain,
+      undefined,
+      targetEmail,
+      targetClass || undefined,
+      true
     );
     setShareUrl(generatedUrl);
+    setCompactQrUrl(compactUrl);
 
     createServerShortQuizUrl(
       quizTitle,
@@ -121,9 +162,22 @@ const ShareModal: React.FC<ShareModalProps> = ({
         baseOrigin,
         undefined,
         currentEmail,
-        selectedClass || undefined
+        selectedClass || undefined,
+        false
+      );
+      const compactUrl = createSelfContainedQuizUrl(
+        quizTitle,
+        questions,
+        subject,
+        grade,
+        baseOrigin,
+        undefined,
+        currentEmail,
+        selectedClass || undefined,
+        true
       );
       setShareUrl(generatedUrl);
+      setCompactQrUrl(compactUrl);
       setShortShareUrl('');
 
       createServerShortQuizUrl(
@@ -164,8 +218,10 @@ const ShareModal: React.FC<ShareModalProps> = ({
   if (!isOpen || !questions || questions.length === 0) return null;
 
   const primaryLinkToCopy = (shareUrl.length > 1800 && shortShareUrl) ? shortShareUrl : (shareUrl || shortShareUrl);
-  const rawQrCandidate = shortShareUrl || shareUrl || 'https://giaoviendoimoi.com';
-  const safeQrValue = rawQrCandidate.length <= 2300 ? rawQrCandidate : (shortShareUrl || customDomain || window.location.origin);
+  const rawQrCandidate = shortShareUrl || (compactQrUrl.length <= 1100 ? compactQrUrl : '') || (shareUrl.length <= 1100 ? shareUrl : '');
+  const safeQrValue = (rawQrCandidate && rawQrCandidate.length <= 1100)
+    ? rawQrCandidate
+    : (shortShareUrl || customDomain || window.location.origin).slice(0, 500);
 
   const handleCopy = async () => {
     if (!primaryLinkToCopy) return;
@@ -252,12 +308,14 @@ const ShareModal: React.FC<ShareModalProps> = ({
 
             {/* Giant QR */}
             <div className="p-6 bg-white rounded-3xl shadow-2xl border-4 border-emerald-400 max-w-[380px] w-full aspect-square flex items-center justify-center">
-              <QRCodeSVG
-                value={safeQrValue}
-                size={320}
-                level="L"
-                includeMargin={false}
-              />
+              <QrErrorBoundary fallbackValue={shortShareUrl || customDomain || window.location.origin} size={320} includeMargin={false}>
+                <QRCodeSVG
+                  value={safeQrValue}
+                  size={320}
+                  level="L"
+                  includeMargin={false}
+                />
+              </QrErrorBoundary>
             </div>
 
             <div className="flex items-center justify-center gap-4 pt-2">
@@ -483,13 +541,15 @@ const ShareModal: React.FC<ShareModalProps> = ({
               {/* QR Display */}
               <div className="flex items-center justify-center">
                 <div className="p-2 bg-white rounded-2xl shadow-sm border border-purple-200">
-                  <QRCodeSVG
-                    id="native-quiz-qr-svg"
-                    value={safeQrValue}
-                    size={120}
-                    level="L"
-                    includeMargin={true}
-                  />
+                  <QrErrorBoundary id="native-quiz-qr-svg" fallbackValue={shortShareUrl || customDomain || window.location.origin} size={120} includeMargin={true}>
+                    <QRCodeSVG
+                      id="native-quiz-qr-svg"
+                      value={safeQrValue}
+                      size={120}
+                      level="L"
+                      includeMargin={true}
+                    />
+                  </QrErrorBoundary>
                 </div>
               </div>
 

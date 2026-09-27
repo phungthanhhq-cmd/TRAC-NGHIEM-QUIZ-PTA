@@ -154,14 +154,14 @@ export function createSelfContainedQuizUrl(
   targetOrigin?: string,
   teacherId?: string,
   teacherEmail?: string,
-  targetClass?: string
+  targetClass?: string,
+  compactForQr?: boolean
 ): string {
   try {
     const currentTeacherEmail = teacherEmail || getTeacherEmail();
     const currentTeacherId = teacherId || getTeacherId(undefined, currentTeacherEmail);
 
-    // Pack into ultra-dense tuple (Version 3/4)
-    const tuple: UltraTupleQuiz = [
+    const buildTuple = (includeExplanations: boolean): UltraTupleQuiz => [
       3,
       title || '',
       subject || '',
@@ -179,15 +179,21 @@ export function createSelfContainedQuizUrl(
           q.options ? q.options.map(o => o.text || '') : [],
           correctIdx,
           q.level || '',
-          q.explanation || ''
+          includeExplanations ? (q.explanation || '') : ''
         ];
       }),
       currentTeacherId,
       currentTeacherEmail
     ];
 
-    const jsonStr = JSON.stringify(tuple);
-    const compressed = LZString.compressToEncodedURIComponent(jsonStr);
+    let compressed = LZString.compressToEncodedURIComponent(JSON.stringify(buildTuple(!compactForQr)));
+    if (!compactForQr && compressed.length > 1600) {
+      // Automatically fallback to stripping explanations if payload is very large
+      const lighter = LZString.compressToEncodedURIComponent(JSON.stringify(buildTuple(false)));
+      if (compressed.length > 3500) {
+        compressed = lighter;
+      }
+    }
     
     let base = targetOrigin || (typeof window !== 'undefined' ? window.location.origin + window.location.pathname : '');
     // Clean trailing slashes or hashes
