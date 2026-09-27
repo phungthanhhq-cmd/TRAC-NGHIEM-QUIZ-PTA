@@ -3,12 +3,13 @@ import { QuizConfig, QuizQuestion } from "../types";
 import { extractTextFromDocx } from "../utils/fileProcessor";
 import { preprocessMathText } from "../utils/mathUtils";
 
-export const DEFAULT_MODEL = "gemini-2.5-flash";
+export const DEFAULT_MODEL = "gemini-3.8-flash";
 export const CANDIDATE_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-3.7-flash",
+  "gemini-3.8-flash",
   "gemini-flash-latest",
-  "gemini-3.1-flash-lite"
+  "gemini-3.1-flash-lite",
+  "gemini-3.7-flash",
+  "gemini-2.5-flash"
 ];
 
 const SYSTEM_INSTRUCTION = `
@@ -49,7 +50,8 @@ export const getActiveUserApiKey = (): string => {
 export const checkServerApiStatus = async (): Promise<{ status: string; hasServerKey: boolean; defaultModel: string }> => {
   try {
     const res = await fetch('/api/status');
-    if (res.ok) {
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
       return await res.json();
     }
   } catch (e) {
@@ -65,6 +67,7 @@ export const testGeminiConnection = async (apiKey?: string): Promise<{ success: 
   const trimmed = apiKey?.trim() || '';
 
   // Try testing via backend API route
+  let serverTestMessage = '';
   try {
     const res = await fetch('/api/test-key', {
       method: 'POST',
@@ -72,9 +75,15 @@ export const testGeminiConnection = async (apiKey?: string): Promise<{ success: 
       body: JSON.stringify({ userApiKey: trimmed })
     });
 
-    const data = await res.json();
-    if (data && typeof data.success === 'boolean') {
-      return data;
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await res.json();
+      if (data && data.success === true) {
+        return data;
+      }
+      if (data && data.message) {
+        serverTestMessage = data.message;
+      }
     }
   } catch (apiErr) {
     console.warn("Server API key test unavailable, trying client-side test...", apiErr);
@@ -83,7 +92,7 @@ export const testGeminiConnection = async (apiKey?: string): Promise<{ success: 
   if (!trimmed) {
     return {
       success: false,
-      message: "🔑 Chưa cấu hình API Key. Vui lòng nhập mã API Key của bạn."
+      message: serverTestMessage || "🔑 Chưa cấu hình API Key. Vui lòng nhập mã API Key của bạn."
     };
   }
 
@@ -109,7 +118,13 @@ export const testGeminiConnection = async (apiKey?: string): Promise<{ success: 
     } catch (err: any) {
       lastErr = err;
       const errStr = String(err?.message || err || '');
-      if (errStr.includes('401') || errStr.includes('403') || errStr.includes('PERMISSION_DENIED') || errStr.includes('API_KEY_INVALID')) {
+      if (
+        errStr.includes('401') ||
+        errStr.includes('403') ||
+        errStr.includes('PERMISSION_DENIED') ||
+        errStr.includes('API_KEY_INVALID') ||
+        errStr.includes('API key not valid')
+      ) {
         break;
       }
       // If 503, 429, 404, continue to try next candidate model
@@ -213,6 +228,7 @@ export const generateQuizFromContent = async (
   `;
 
   // 1. Primary path: Server-side API proxy route (handles user key + server key fallback securely)
+  let serverErrorMessage = '';
   try {
     const res = await fetch('/api/generate-quiz', {
       method: 'POST',
@@ -226,26 +242,27 @@ export const generateQuizFromContent = async (
       })
     });
 
-    if (res.ok) {
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
       const data = await res.json();
       if (data && Array.isArray(data.questions)) {
         return data.questions as QuizQuestion[];
       }
-    } else {
+    } else if (contentType.includes('application/json')) {
       const errData = await res.json().catch(() => ({}));
       if (errData.error) {
-        throw new Error(errData.error);
+        serverErrorMessage = errData.error;
       }
     }
   } catch (apiErr: any) {
-    if (apiErr?.message && !apiErr.message.includes('Failed to fetch')) {
-      throw apiErr;
-    }
     console.warn("Server API proxy unreachable, attempting client-side fallback...", apiErr);
   }
 
   // 2. Client-side SDK fallback if user has entered an API key
   if (!userApiKey) {
+    if (serverErrorMessage) {
+      throw new Error(serverErrorMessage);
+    }
     throw new Error("🔑 Bạn chưa kết nối Gemini API.\n\nVui lòng mở mục 'Cấu hình Gemini API' và nhập API Key của bạn để tiếp tục.");
   }
 
@@ -348,44 +365,18 @@ export const generateQuizFromContent = async (
     } catch (err: any) {
       lastClientError = err;
       const errStr = String(err?.message || err || '');
-      
-      const isTransient = errStr.includes('429') || 
-        errStr.includes('RESOURCE_EXHAUSTED') || 
-        errStr.includes('500') || 
-        errStr.includes('503') || 
-        errStr.includes('UNAVAILABLE') || 
-        errStr.includes('overloaded') ||
-        errStr.includes('high demand') ||
-        errStr.includes('Service Unavailable');
 
-      if (isTransient) {
-        await new Promise(res => setTimeout(res, 1200));
-        try {
-          const responseRetry = await ai.models.generateContent({
-            model: targetModel,
-            contents: {
-              parts: [...fileParts, { text: promptText }]
-            },
-            config: {
-              systemInstruction: SYSTEM_INSTRUCTION,
-              responseMimeType: "application/json",
-              responseSchema: dynamicQuizSchema,
-              temperature: 0.4,
-            }
-          });
-          responseText = responseRetry.text;
-          if (responseText) break;
-        } catch (retryErr: any) {
-          lastClientError = retryErr;
-          continue; // Fallback to next model
-        }
-      } else if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
-        continue;
-      } else if (errStr.includes('401') || errStr.includes('403') || errStr.includes('PERMISSION_DENIED') || errStr.includes('API_KEY_INVALID')) {
+      if (
+        errStr.includes('401') ||
+        errStr.includes('403') ||
+        errStr.includes('PERMISSION_DENIED') ||
+        errStr.includes('API_KEY_INVALID') ||
+        errStr.includes('API key not valid')
+      ) {
         break;
-      } else {
-        continue;
       }
+
+      continue;
     }
   }
 

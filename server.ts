@@ -6,26 +6,52 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { preprocessMathText } from './utils/mathUtils';
 
-export const DEFAULT_MODEL = "gemini-2.5-flash";
+export const DEFAULT_MODEL = "gemini-3.8-flash";
 export const CANDIDATE_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-3.7-flash",
+  "gemini-3.8-flash",
   "gemini-flash-latest",
-  "gemini-3.1-flash-lite"
+  "gemini-3.1-flash-lite",
+  "gemini-3.7-flash",
+  "gemini-2.5-flash"
 ];
 
-// In-memory quiz store (maps short 6-character code to quiz package)
+// Persistent quiz store (maps short 6-character code to quiz package)
 interface QuizStoreItem {
   id: string;
   title: string;
   subject?: string;
   grade?: string;
   teacherId?: string;
+  teacherEmail?: string;
+  targetClass?: string;
   questions: any[];
   createdAt: number;
 }
 
+const QUIZZES_FILE = path.join(process.cwd(), 'quizzes.json');
 const quizStore = new Map<string, QuizStoreItem>();
+
+try {
+  if (fs.existsSync(QUIZZES_FILE)) {
+    const rawQuizzes = JSON.parse(fs.readFileSync(QUIZZES_FILE, 'utf-8'));
+    if (Array.isArray(rawQuizzes)) {
+      rawQuizzes.forEach((q: QuizStoreItem) => {
+        if (q && q.id) quizStore.set(q.id, q);
+      });
+    }
+  }
+} catch (e) {
+  console.warn("Failed to load quizzes.json, starting fresh", e);
+}
+
+function saveQuizzesToFile() {
+  try {
+    const arr = Array.from(quizStore.values()).slice(-500);
+    fs.writeFileSync(QUIZZES_FILE, JSON.stringify(arr, null, 2), 'utf-8');
+  } catch (e) {
+    console.error("Failed to write quizzes.json", e);
+  }
+}
 
 // Submissions store structure
 interface QuestionAnswerDetail {
@@ -424,9 +450,16 @@ async function startServer() {
 
       // Outer loop: Try available API keys
       for (const currentKey of keysToTry) {
-        const ai = new GoogleGenAI({ apiKey: currentKey });
+        const ai = new GoogleGenAI({
+          apiKey: currentKey,
+          httpOptions: {
+            headers: {
+              'User-Agent': 'aistudio-build',
+            }
+          }
+        });
 
-        // Inner loop: Try candidate models
+        // Inner loop: Try candidate models with instant failover
         for (const targetModel of CANDIDATE_MODELS) {
           try {
             const response = await ai.models.generateContent({
@@ -446,49 +479,22 @@ async function startServer() {
           } catch (err: any) {
             lastError = err;
             const errStr = String(err?.message || err || '');
-            
-            // Check for transient server overload / rate limit / 503 / 429 / 500
-            const isTransient = errStr.includes('429') || 
-              errStr.includes('RESOURCE_EXHAUSTED') || 
-              errStr.includes('500') || 
-              errStr.includes('503') || 
-              errStr.includes('UNAVAILABLE') || 
-              errStr.includes('overloaded') ||
-              errStr.includes('high demand') ||
-              errStr.includes('Service Unavailable');
 
-            if (isTransient) {
-              console.warn(`[Server] Model ${targetModel} is busy or returned 503/429. Retrying once...`);
-              await new Promise(resolve => setTimeout(resolve, 1200));
-              try {
-                const retryRes = await ai.models.generateContent({
-                  model: targetModel,
-                  contents: {
-                    parts: [...(fileParts || []), { text: promptText }]
-                  },
-                  config: {
-                    systemInstruction: SYSTEM_INSTRUCTION,
-                    responseMimeType: "application/json",
-                    responseSchema: dynamicQuizSchema,
-                    temperature: 0.4,
-                  }
-                });
-                responseText = retryRes.text;
-                if (responseText) break;
-              } catch (retryErr: any) {
-                lastError = retryErr;
-                console.warn(`[Server] Retry on ${targetModel} failed, trying next candidate model in list...`);
-                continue; // CRITICAL: Fallback to next candidate model!
-              }
-            } else if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
-              continue; // try next candidate model
-            } else if (errStr.includes('401') || errStr.includes('403') || errStr.includes('PERMISSION_DENIED') || errStr.includes('API_KEY_INVALID')) {
-              break; // Key has permission issue, try next key
-            } else {
-              // Unknown error on this model, try next candidate model
-              console.warn(`[Server] Non-fatal model error on ${targetModel}: ${errStr}. Trying next candidate model...`);
-              continue;
+            // If key itself is invalid or denied, immediately break to try the next key (e.g. server fallback key)
+            if (
+              errStr.includes('401') ||
+              errStr.includes('403') ||
+              errStr.includes('PERMISSION_DENIED') ||
+              errStr.includes('API_KEY_INVALID') ||
+              errStr.includes('API key not valid')
+            ) {
+              console.warn(`[Server] Key permission/validity error on ${targetModel}, switching to fallback key if available...`);
+              break;
             }
+
+            // For 503 overloaded, 429 rate limit, 404 not found, or other model errors, immediately try the next candidate model
+            console.warn(`[Server] Model ${targetModel} unavailable (${errStr.slice(0, 120)}), switching immediately to next candidate model...`);
+            continue;
           }
         }
 
@@ -617,7 +623,7 @@ async function startServer() {
   // API Route: Save quiz and return a short code
   app.post('/api/share', (req, res) => {
     try {
-      const { title, questions, subject, grade, teacherId } = req.body;
+      const { title, questions, subject, grade, teacherId, teacherEmail, targetClass } = req.body;
       if (!questions || !Array.isArray(questions) || questions.length === 0) {
         return res.status(400).json({ error: 'Nội dung bộ câu hỏi không hợp lệ' });
       }
@@ -633,11 +639,14 @@ async function startServer() {
         subject,
         grade,
         teacherId,
+        teacherEmail: teacherEmail ? String(teacherEmail).trim().toLowerCase() : undefined,
+        targetClass: targetClass ? String(targetClass).trim() : undefined,
         questions,
         createdAt: Date.now()
       };
 
       quizStore.set(code, item);
+      saveQuizzesToFile();
 
       return res.json({ code, id: code });
     } catch (err) {
@@ -663,42 +672,60 @@ async function startServer() {
     try {
       const { userApiKey } = req.body;
       const trimmedKey = typeof userApiKey === 'string' ? userApiKey.trim() : '';
+      const serverEnvKey = (process.env.GEMINI_API_KEY || '').trim();
 
-      const keyToTest = trimmedKey || (process.env.GEMINI_API_KEY || '').trim();
+      const keysToTry: string[] = [];
+      if (trimmedKey) keysToTry.push(trimmedKey);
+      if (serverEnvKey && !keysToTry.includes(serverEnvKey)) keysToTry.push(serverEnvKey);
 
-      if (!keyToTest) {
+      if (keysToTry.length === 0) {
         return res.status(400).json({ 
           success: false, 
           message: '🔑 Bạn chưa kết nối Gemini API. Vui lòng nhập API Key của bạn.' 
         });
       }
 
-      const ai = new GoogleGenAI({ apiKey: keyToTest });
-
       let lastError: any = null;
-      for (const targetModel of CANDIDATE_MODELS) {
-        try {
-          const response = await ai.models.generateContent({
-            model: targetModel,
-            contents: "Xin chào, hãy phản hồi 'OK'.",
-            config: { temperature: 0.1 }
-          });
+      for (const currentKey of keysToTry) {
+        const ai = new GoogleGenAI({
+          apiKey: currentKey,
+          httpOptions: {
+            headers: {
+              'User-Agent': 'aistudio-build',
+            }
+          }
+        });
 
-          if (response && response.text) {
-            return res.json({
-              success: true,
-              message: `🟢 Gemini API: Đã kết nối thành công (${targetModel}) và sẵn sàng tạo câu hỏi!`,
-              model: targetModel
+        for (const targetModel of CANDIDATE_MODELS) {
+          try {
+            const response = await ai.models.generateContent({
+              model: targetModel,
+              contents: "Xin chào, hãy phản hồi 'OK'.",
+              config: { temperature: 0.1 }
             });
+
+            if (response && response.text) {
+              return res.json({
+                success: true,
+                message: `🟢 Gemini API: Đã kết nối thành công (${targetModel}) và sẵn sàng tạo câu hỏi!`,
+                model: targetModel
+              });
+            }
+          } catch (err: any) {
+            lastError = err;
+            const errStr = String(err?.message || err);
+            if (
+              errStr.includes('401') ||
+              errStr.includes('403') ||
+              errStr.includes('PERMISSION_DENIED') ||
+              errStr.includes('API_KEY_INVALID') ||
+              errStr.includes('API key not valid')
+            ) {
+              break; // Stop testing other models on this key, try next key if available
+            }
+            // If 503 (overloaded) or 429 or 404, continue testing next model
+            continue;
           }
-        } catch (err: any) {
-          lastError = err;
-          const errStr = String(err?.message || err);
-          if (errStr.includes('401') || errStr.includes('403') || errStr.includes('PERMISSION_DENIED') || errStr.includes('API_KEY_INVALID')) {
-            break; // Stop testing other models if key itself is denied
-          }
-          // If 503 (overloaded) or 429 or 404, continue testing next model
-          continue;
         }
       }
 

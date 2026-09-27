@@ -218,7 +218,16 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
     setRefreshToast('Đang quét kết quả bài làm mới nhất...');
-    const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+
+    let email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+    if (isEditingEmail && emailInput.trim()) {
+      email = emailInput.trim().toLowerCase();
+      setTeacherEmail(email);
+      setCurrentTeacherEmail(email);
+      setIsEditingEmail(false);
+      setEmailInput('');
+    }
+
     try {
       const [subsResult] = await Promise.all([
         fetchSubmissions(email, false),
@@ -227,9 +236,9 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
       setLastRefreshedAt(Date.now());
       const count = Array.isArray(subsResult) ? subsResult.length : submissions.length;
       if (count > 0) {
-        setRefreshToast(`Đã đồng bộ ${count} bài nộp của học sinh!`);
+        setRefreshToast(`Đã đồng bộ ${count} bài nộp của học sinh (${email})!`);
       } else {
-        setRefreshToast('Đã kiểm tra: Chưa có lượt nộp bài mới');
+        setRefreshToast(`Đã đồng bộ (${email}): Chưa có lượt nộp mới`);
       }
       setTimeout(() => setRefreshToast(null), 3000);
     } catch (err) {
@@ -543,7 +552,8 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   // Handle Save Roster (Local storage + server background sync)
   const handleSaveRoster = async () => {
     if (!newClassName.trim()) {
-      alert('Vui lòng nhập tên lớp (ví dụ: 12A1, 10A3...)');
+      setRefreshToast('Vui lòng nhập tên lớp (ví dụ: 12A1, 10A3...)');
+      setTimeout(() => setRefreshToast(null), 3000);
       return;
     }
 
@@ -553,7 +563,8 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
       .filter(n => n.length > 0);
 
     if (names.length === 0) {
-      alert('Vui lòng nhập danh sách học sinh (mỗi dòng một tên)');
+      setRefreshToast('Vui lòng nhập danh sách học sinh (mỗi dòng một tên)');
+      setTimeout(() => setRefreshToast(null), 3000);
       return;
     }
 
@@ -636,8 +647,6 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
 
   // Handle Delete Roster
   const handleDeleteRoster = async (id: string) => {
-    if (!confirm('Bạn có chắc chắn muốn xóa danh sách lớp này?')) return;
-    
     // 1. Immediately delete from local state and LocalStorage
     setRosters(prev => prev.filter(r => r.id !== id));
     try {
@@ -908,6 +917,9 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
                       type="email"
                       value={emailInput}
                       onChange={(e) => setEmailInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleSaveTeacherEmail();
+                      }}
                       placeholder="email@gmail.com"
                       className="px-2 py-0.5 text-xs border border-indigo-300 rounded-lg outline-none bg-white focus:ring-1 focus:ring-indigo-500"
                     />

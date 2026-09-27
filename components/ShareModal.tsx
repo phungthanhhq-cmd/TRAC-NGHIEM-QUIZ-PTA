@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { QuizQuestion } from '../types';
-import { createSelfContainedQuizUrl, getTeacherEmail, setTeacherEmail } from '../utils/shareUtils';
+import { createSelfContainedQuizUrl, createServerShortQuizUrl, getTeacherEmail, setTeacherEmail } from '../utils/shareUtils';
 import { QRCodeSVG } from 'qrcode.react';
 import { 
   Share2, 
@@ -46,6 +46,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const [shareUrl, setShareUrl] = useState<string>('');
+  const [shortShareUrl, setShortShareUrl] = useState<string>('');
   const [isFullScreenQR, setIsFullScreenQR] = useState<boolean>(false);
   const [customDomain, setCustomDomain] = useState<string>('');
   const [showDomainEdit, setShowDomainEdit] = useState<boolean>(false);
@@ -74,6 +75,19 @@ const ShareModal: React.FC<ShareModalProps> = ({
       targetClass || undefined
     );
     setShareUrl(generatedUrl);
+
+    createServerShortQuizUrl(
+      quizTitle,
+      questions,
+      subject,
+      grade,
+      targetDomain,
+      undefined,
+      targetEmail,
+      targetClass || undefined
+    ).then(sUrl => {
+      if (sUrl) setShortShareUrl(sUrl);
+    });
   };
 
   useEffect(() => {
@@ -110,6 +124,20 @@ const ShareModal: React.FC<ShareModalProps> = ({
         selectedClass || undefined
       );
       setShareUrl(generatedUrl);
+      setShortShareUrl('');
+
+      createServerShortQuizUrl(
+        quizTitle,
+        questions,
+        subject,
+        grade,
+        baseOrigin,
+        undefined,
+        currentEmail,
+        selectedClass || undefined
+      ).then(sUrl => {
+        if (sUrl) setShortShareUrl(sUrl);
+      });
     }
   }, [isOpen, quizTitle, questions, subject, grade, selectedClass]);
 
@@ -135,10 +163,14 @@ const ShareModal: React.FC<ShareModalProps> = ({
 
   if (!isOpen || !questions || questions.length === 0) return null;
 
+  const primaryLinkToCopy = (shareUrl.length > 1800 && shortShareUrl) ? shortShareUrl : (shareUrl || shortShareUrl);
+  const rawQrCandidate = shortShareUrl || shareUrl || 'https://giaoviendoimoi.com';
+  const safeQrValue = rawQrCandidate.length <= 2300 ? rawQrCandidate : (shortShareUrl || customDomain || window.location.origin);
+
   const handleCopy = async () => {
-    if (!shareUrl) return;
+    if (!primaryLinkToCopy) return;
     try {
-      await navigator.clipboard.writeText(shareUrl);
+      await navigator.clipboard.writeText(primaryLinkToCopy);
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2500);
     } catch (err) {
@@ -221,7 +253,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
             {/* Giant QR */}
             <div className="p-6 bg-white rounded-3xl shadow-2xl border-4 border-emerald-400 max-w-[380px] w-full aspect-square flex items-center justify-center">
               <QRCodeSVG
-                value={shareUrl || 'https://giaoviendoimoi.com'}
+                value={safeQrValue}
                 size={320}
                 level="L"
                 includeMargin={false}
@@ -305,6 +337,9 @@ const ShareModal: React.FC<ShareModalProps> = ({
                   placeholder="gmail-cua-ban@gmail.com"
                   value={emailInput}
                   onChange={(e) => setEmailInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleSaveEmail();
+                  }}
                   className="px-2.5 py-1 text-xs border border-indigo-300 rounded-lg bg-white outline-none focus:ring-1 focus:ring-indigo-500"
                 />
                 <button
@@ -406,7 +441,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
               {/* URL Box */}
               <div className="space-y-2">
                 <div className="bg-white border border-blue-200 rounded-xl px-3 py-2 text-xs text-slate-700 font-mono select-all outline-none truncate shadow-inner">
-                  {shareUrl || 'Đang tạo liên kết...'}
+                  {primaryLinkToCopy || 'Đang tạo liên kết...'}
                 </div>
 
                 <button
@@ -450,7 +485,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
                 <div className="p-2 bg-white rounded-2xl shadow-sm border border-purple-200">
                   <QRCodeSVG
                     id="native-quiz-qr-svg"
-                    value={shareUrl || 'https://giaoviendoimoi.com'}
+                    value={safeQrValue}
                     size={120}
                     level="L"
                     includeMargin={true}

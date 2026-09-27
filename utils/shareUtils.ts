@@ -237,10 +237,24 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
 
     if (rawParam) {
       let jsonStr = '';
-      const decompressed = LZString.decompressFromEncodedURIComponent(rawParam);
-      if (decompressed) {
-        jsonStr = decompressed;
-      } else {
+      const candidates = [
+        rawParam,
+        rawParam.replace(/ /g, '+'),
+      ];
+      try {
+        const decodedUri = decodeURIComponent(rawParam);
+        candidates.push(decodedUri, decodedUri.replace(/ /g, '+'));
+      } catch (e) {}
+
+      for (const candidate of candidates) {
+        const decompressed = LZString.decompressFromEncodedURIComponent(candidate);
+        if (decompressed && (decompressed.startsWith('[') || decompressed.startsWith('{'))) {
+          jsonStr = decompressed;
+          break;
+        }
+      }
+
+      if (!jsonStr) {
         try {
           const base64 = decodeURIComponent(rawParam);
           const binary = atob(base64);
@@ -374,7 +388,8 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
     if (shortCode) {
       try {
         const res = await fetch(`/api/share/${shortCode}`);
-        if (res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && contentType.includes('application/json')) {
           const data = await res.json();
           if (data && Array.isArray(data.questions)) {
             return {
@@ -383,6 +398,8 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
               subject: data.subject,
               grade: data.grade,
               teacherId: data.teacherId,
+              teacherEmail: data.teacherEmail ? String(data.teacherEmail).trim().toLowerCase() : undefined,
+              targetClass: extractedClass ? extractedClass.trim() : (data.targetClass || undefined),
               isSharedLink: true
             };
           }
@@ -404,6 +421,55 @@ export async function decodeQuizFromUrl(): Promise<SharedQuizPackage | null> {
     isError: true,
     errorMessage: '⚠️ Liên kết bài tập không hợp lệ hoặc đã hết hạn. Vui lòng kiểm tra lại liên kết do giáo viên cung cấp.'
   };
+}
+
+/**
+ * Creates a server-backed short URL (#q=CODE) for ultra-clean QR codes & short links
+ */
+export async function createServerShortQuizUrl(
+  title: string,
+  questions: QuizQuestion[],
+  subject?: string,
+  grade?: string,
+  targetOrigin?: string,
+  teacherId?: string,
+  teacherEmail?: string,
+  targetClass?: string
+): Promise<string> {
+  try {
+    const currentTeacherEmail = teacherEmail || getTeacherEmail();
+    const currentTeacherId = teacherId || getTeacherId(undefined, currentTeacherEmail);
+
+    const res = await fetch('/api/share', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        questions,
+        subject,
+        grade,
+        teacherId: currentTeacherId,
+        teacherEmail: currentTeacherEmail,
+        targetClass: targetClass || undefined
+      })
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const data = await res.json();
+      if (data && data.code) {
+        let base = targetOrigin || (typeof window !== 'undefined' ? window.location.origin + window.location.pathname : '');
+        base = base.replace(/[#/]+$/, '');
+        let url = `${base}/#q=${data.code}`;
+        if (targetClass && targetClass.trim()) {
+          url += `&class=${encodeURIComponent(targetClass.trim())}`;
+        }
+        return url;
+      }
+    }
+  } catch (e) {
+    // fallback silently if offline or static host
+  }
+  return '';
 }
 
 /**
