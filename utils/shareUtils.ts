@@ -497,3 +497,140 @@ export async function shortenUrl(url: string): Promise<string> {
   }
   return '';
 }
+
+export interface StudentResultPayload {
+  studentName: string;
+  studentClass: string;
+  quizTitle: string;
+  score: number;
+  correctCount: number;
+  totalCount: number;
+  timeSpentSeconds: number;
+  teacherEmail?: string;
+  teacherId?: string;
+  subject?: string;
+  grade?: string;
+  submittedAt?: number;
+  answersDetails?: any[];
+}
+
+/**
+ * Generates formatted text & compact token for Zalo / messaging
+ */
+export function generateStudentResultPackage(payload: StudentResultPayload) {
+  const timeMin = Math.floor(payload.timeSpentSeconds / 60);
+  const timeSec = payload.timeSpentSeconds % 60;
+  const timeStr = `${timeMin > 0 ? `${timeMin}p ` : ''}${timeSec}s`;
+
+  // Mini dense tuple: [1, sName, sClass, qTitle, score, correct, total, time, email, submittedAt]
+  const tuple = [
+    1,
+    payload.studentName.trim(),
+    payload.studentClass.trim(),
+    payload.quizTitle.trim(),
+    payload.score,
+    payload.correctCount,
+    payload.totalCount,
+    payload.timeSpentSeconds,
+    payload.teacherEmail || '',
+    payload.submittedAt || Date.now()
+  ];
+
+  let token = '';
+  try {
+    token = 'AQSUB:' + LZString.compressToEncodedURIComponent(JSON.stringify(tuple));
+  } catch (e) {
+    token = 'AQSUB:' + btoa(unescape(encodeURIComponent(JSON.stringify(tuple))));
+  }
+
+  const zaloMessage = 
+`[AI QUIZ - BÁO CÁO KẾT QUẢ BÀI LÀM]
+👤 Học sinh: ${payload.studentName || 'Học sinh'}
+🏫 Lớp: ${payload.studentClass || 'Tự do'}
+📝 Bài tập: ${payload.quizTitle}
+🎯 Điểm số: ${payload.score}/10 (${payload.correctCount}/${payload.totalCount} câu đúng)
+⏱️ Thời gian làm bài: ${timeStr}
+🔑 Mã xác thực: ${token}`;
+
+  return {
+    token,
+    zaloMessage,
+    timeStr
+  };
+}
+
+/**
+ * Parses a student result code or Zalo message pasted by the teacher
+ */
+export function parseStudentResultCode(text: string): (StudentResultPayload & { id: string }) | null {
+  if (!text || typeof text !== 'string') return null;
+  const clean = text.trim();
+
+  // 1. Look for AQSUB:TOKEN pattern
+  const tokenMatch = clean.match(/AQSUB:([A-Za-z0-9+/=_-]+)/);
+  if (tokenMatch && tokenMatch[1]) {
+    const rawToken = tokenMatch[1];
+    try {
+      let jsonStr = LZString.decompressFromEncodedURIComponent(rawToken);
+      if (!jsonStr) {
+        jsonStr = decodeURIComponent(escape(atob(rawToken)));
+      }
+      if (jsonStr) {
+        const parsed = JSON.parse(jsonStr);
+        if (Array.isArray(parsed) && parsed[0] === 1) {
+          const [, sName, sClass, qTitle, score, correct, total, time, email, submittedAt] = parsed;
+          return {
+            id: 'sub_zalo_' + (submittedAt || Date.now()) + '_' + Math.random().toString(36).substring(2, 6),
+            studentName: sName,
+            studentClass: sClass,
+            quizTitle: qTitle,
+            score: typeof score === 'number' ? score : 0,
+            correctCount: typeof correct === 'number' ? correct : 0,
+            totalCount: typeof total === 'number' ? total : 0,
+            timeSpentSeconds: typeof time === 'number' ? time : 0,
+            teacherEmail: email || undefined,
+            submittedAt: submittedAt || Date.now()
+          };
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to parse AQSUB token", e);
+    }
+  }
+
+  // 2. Fallback heuristic parsing from plain text message
+  // Example lines: "Học sinh: Nguyễn Văn A", "Lớp: 12A1", "Điểm số: 8.5/10"
+  try {
+    const nameMatch = clean.match(/(?:Học sinh|HS|Em|Tên):\s*([^\n\r,]+)/i);
+    const classMatch = clean.match(/(?:Lớp):\s*([^\n\r,]+)/i);
+    const scoreMatch = clean.match(/(?:Điểm số|Điểm):\s*([\d.]+)/i);
+    const quizMatch = clean.match(/(?:Bài tập|Bài làm|Đề):\s*([^\n\r]+)/i);
+    const correctMatch = clean.match(/(\d+)\/(\d+)\s*(?:câu)/i);
+
+    if (nameMatch && scoreMatch) {
+      const studentName = nameMatch[1].trim();
+      const studentClass = classMatch ? classMatch[1].trim() : '';
+      const score = parseFloat(scoreMatch[1]);
+      const quizTitle = quizMatch ? quizMatch[1].trim() : 'Bài tập ôn tập';
+      const correctCount = correctMatch ? parseInt(correctMatch[1]) : Math.round(score);
+      const totalCount = correctMatch ? parseInt(correctMatch[2]) : 10;
+
+      return {
+        id: 'sub_manual_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+        studentName,
+        studentClass,
+        quizTitle,
+        score: isNaN(score) ? 0 : score,
+        correctCount: isNaN(correctCount) ? 0 : correctCount,
+        totalCount: isNaN(totalCount) ? 10 : totalCount,
+        timeSpentSeconds: 180,
+        submittedAt: Date.now()
+      };
+    }
+  } catch (err) {
+    console.warn("Failed heuristic parse", err);
+  }
+
+  return null;
+}
+

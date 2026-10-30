@@ -172,7 +172,7 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(cors());
+  app.use(cors({ origin: true, credentials: true }));
   app.use(express.json({ limit: '25mb' }));
 
   // API Route: Check API readiness & server capabilities
@@ -186,9 +186,57 @@ async function startServer() {
     });
   });
 
-  // API Route: Student submits quiz result
-  app.post('/api/submit-quiz', (req, res) => {
+  // API Route: Bulk sync submissions between ais-dev, ais-pre, and client local storage
+  app.post('/api/bulk-sync-submissions', (req, res) => {
     try {
+      const { items } = req.body;
+      if (Array.isArray(items)) {
+        let addedCount = 0;
+        items.forEach((newItem: SubmissionStoreItem) => {
+          if (!newItem || !newItem.studentName || !newItem.quizTitle) return;
+          const exists = submissions.some(s => 
+            s.id === newItem.id || 
+            (s.studentName.toLowerCase().trim() === newItem.studentName.toLowerCase().trim() && 
+             s.quizTitle.trim() === newItem.quizTitle.trim() && 
+             Math.abs((s.submittedAt || 0) - (newItem.submittedAt || 0)) < 15000)
+          );
+          if (!exists) {
+            submissions.unshift(newItem);
+            addedCount++;
+          }
+        });
+        if (addedCount > 0) {
+          saveSubmissionsToFile();
+        }
+        return res.json({ success: true, addedCount, totalCount: submissions.length });
+      }
+      return res.json({ success: true, addedCount: 0, totalCount: submissions.length });
+    } catch (e) {
+      console.error('Error in /api/bulk-sync-submissions:', e);
+      return res.status(500).json({ error: 'Sync failed' });
+    }
+  });
+
+  // API Route: Student submits quiz result (Supports POST, GET fallback, and Beacon)
+  const handleSubmitQuiz = (req: express.Request, res: express.Response) => {
+    try {
+      let rawData: any = req.body;
+      if (req.method === 'GET' && req.query) {
+        if (typeof req.query.data === 'string') {
+          try {
+            rawData = JSON.parse(decodeURIComponent(req.query.data));
+          } catch (e) {
+            rawData = req.query;
+          }
+        } else {
+          rawData = req.query;
+        }
+      } else if (typeof req.body === 'string') {
+        try {
+          rawData = JSON.parse(req.body);
+        } catch (e) {}
+      }
+
       const {
         teacherId,
         teacherEmail,
@@ -202,7 +250,7 @@ async function startServer() {
         totalCount,
         timeSpentSeconds,
         answersDetails
-      } = req.body;
+      } = rawData || {};
 
       const tEmail = (teacherEmail && typeof teacherEmail === 'string') ? teacherEmail.trim().toLowerCase() : '';
       const tId = (teacherId && typeof teacherId === 'string' && teacherId.trim()) 
@@ -235,10 +283,10 @@ async function startServer() {
         grade: grade || '',
         studentName: sName,
         studentClass: sClass,
-        score: typeof score === 'number' ? score : 0,
-        correctCount: typeof correctCount === 'number' ? correctCount : 0,
-        totalCount: typeof totalCount === 'number' ? totalCount : 0,
-        timeSpentSeconds: typeof timeSpentSeconds === 'number' ? timeSpentSeconds : 0,
+        score: typeof score === 'number' ? score : (parseFloat(score) || 0),
+        correctCount: typeof correctCount === 'number' ? correctCount : (parseInt(correctCount) || 0),
+        totalCount: typeof totalCount === 'number' ? totalCount : (parseInt(totalCount) || 0),
+        timeSpentSeconds: typeof timeSpentSeconds === 'number' ? timeSpentSeconds : (parseInt(timeSpentSeconds) || 0),
         submittedAt: Date.now(),
         attemptNumber,
         answersDetails: Array.isArray(answersDetails) ? answersDetails : undefined
@@ -257,7 +305,11 @@ async function startServer() {
       console.error('Error in /api/submit-quiz:', err);
       return res.status(500).json({ error: 'Lỗi khi lưu kết quả bài làm' });
     }
-  });
+  };
+
+  app.post('/api/submit-quiz', handleSubmitQuiz);
+  app.get('/api/submit-quiz', handleSubmitQuiz);
+  app.post('/api/submit-quiz-beacon', express.text({ type: '*/*' }), handleSubmitQuiz);
 
   // API Route: Teacher retrieves submission records
   app.get('/api/teacher-submissions', (req, res) => {

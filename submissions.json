@@ -1,5 +1,16 @@
 [
   {
+    "id": "test_1",
+    "studentName": "Test Student",
+    "studentClass": "12A1",
+    "quizTitle": "Ngữ văn Lớp 6: Trái đất",
+    "score": 10,
+    "correctCount": 10,
+    "totalCount": 10,
+    "timeSpentSeconds": 60,
+    "submittedAt": 1787917050000
+  },
+  {
     "id": "sub_1787917046830_httvi",
     "teacherId": "tea_phung_3jaj8r",
     "teacherEmail": "phungthanhhq@gmail.com",

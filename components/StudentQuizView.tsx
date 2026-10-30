@@ -1,7 +1,27 @@
 import React, { useState, useEffect } from 'react';
 import { QuizQuestion } from '../types';
 import MathRenderer from './MathRenderer';
-import { CheckCircle2, XCircle, Clock, Award, RotateCcw, ArrowLeft, Send, Sparkles, AlertCircle, ShieldCheck, UserCheck } from 'lucide-react';
+import { 
+  CheckCircle2, 
+  XCircle, 
+  Clock, 
+  Award, 
+  RotateCcw, 
+  ArrowLeft, 
+  Send, 
+  Sparkles, 
+  AlertCircle, 
+  ShieldCheck, 
+  UserCheck,
+  MessageSquare,
+  Copy,
+  Check,
+  Download,
+  QrCode,
+  Smartphone,
+  Share2
+} from 'lucide-react';
+import { generateStudentResultPackage } from '../utils/shareUtils';
 
 interface StudentQuizViewProps {
   title: string;
@@ -44,6 +64,9 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [submissionStatus, setSubmissionStatus] = useState<'idle' | 'submitting' | 'success' | 'failed'>('idle');
   const [attemptCount, setAttemptCount] = useState<number>(1);
+  const [resultPkg, setResultPkg] = useState<{ token: string; zaloMessage: string; timeStr: string } | null>(null);
+  const [copiedZalo, setCopiedZalo] = useState(false);
+  const [showResultCodeModal, setShowResultCodeModal] = useState(false);
 
   // Load saved rosters from local storage for autocomplete
   const [savedRosters, setSavedRosters] = useState<{ className: string; studentNames: string[] }[]>(() => {
@@ -184,29 +207,213 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
         console.warn('Could not save local submission backup', locErr);
       }
 
-      try {
-        const res = await fetch('/api/submit-quiz', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-
-        if (res.ok) {
-          const data = await res.json();
-          setSubmissionStatus('success');
-          if (data.attemptNumber) {
-            setAttemptCount(data.attemptNumber);
-          }
-        } else {
-          setSubmissionStatus(hasSavedLocally ? 'success' : 'failed');
-        }
-      } catch (err) {
-        console.warn('Could not send submission to server, using local save status', err);
-        setSubmissionStatus(hasSavedLocally ? 'success' : 'failed');
+      let isSuccess = false;
+      const targets = [window.location.origin];
+      if (window.location.origin.includes('ais-pre-')) {
+        targets.push(window.location.origin.replace('ais-pre-', 'ais-dev-'));
+      } else if (window.location.origin.includes('ais-dev-')) {
+        targets.push(window.location.origin.replace('ais-dev-', 'ais-pre-'));
       }
+
+      for (const target of targets) {
+        if (isSuccess) break;
+
+        // Tier 1: POST with credentials: 'include'
+        try {
+          const res = await fetch(`${target}/api/submit-quiz`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify(payload)
+          });
+
+          const contentType = res.headers.get('content-type') || '';
+          if (res.ok && contentType.includes('application/json')) {
+            const data = await res.json();
+            if (data && data.success) {
+              isSuccess = true;
+              setSubmissionStatus('success');
+              if (data.attemptNumber) setAttemptCount(data.attemptNumber);
+              break;
+            }
+          }
+        } catch (postErr) {
+          console.warn('POST submit attempt failed, trying fallback', postErr);
+        }
+
+        // Tier 2: GET fallback with query string (bypasses 302 redirect cookie loss)
+        if (!isSuccess) {
+          try {
+            const dataStr = encodeURIComponent(JSON.stringify(payload));
+            const getRes = await fetch(`${target}/api/submit-quiz?data=${dataStr}`, {
+              method: 'GET',
+              credentials: 'include'
+            });
+            const getContentType = getRes.headers.get('content-type') || '';
+            if (getRes.ok && getContentType.includes('application/json')) {
+              const getData = await getRes.json();
+              if (getData && getData.success) {
+                isSuccess = true;
+                setSubmissionStatus('success');
+                if (getData.attemptNumber) setAttemptCount(getData.attemptNumber);
+                break;
+              }
+            }
+          } catch (getErr) {
+            console.warn('GET submit fallback attempt failed', getErr);
+          }
+        }
+
+        // Tier 3: Beacon background
+        if (!isSuccess && typeof navigator !== 'undefined' && navigator.sendBeacon) {
+          try {
+            navigator.sendBeacon(`${target}/api/submit-quiz-beacon`, JSON.stringify(payload));
+          } catch (bErr) {}
+        }
+      }
+
+      if (!isSuccess) {
+        setSubmissionStatus('failed');
+      }
+
+      // Generate result package for Zalo / direct reporting
+      const pkg = generateStudentResultPackage({
+        studentName: payload.studentName,
+        studentClass: payload.studentClass,
+        quizTitle: payload.quizTitle,
+        score: payload.score,
+        correctCount: payload.correctCount,
+        totalCount: payload.totalCount,
+        timeSpentSeconds: payload.timeSpentSeconds,
+        teacherEmail: payload.teacherEmail,
+        submittedAt: Date.now()
+      });
+      setResultPkg(pkg);
+
     } catch (outerErr) {
       console.warn('Submission error:', outerErr);
-      setSubmissionStatus('success');
+      setSubmissionStatus('failed');
+    }
+  };
+
+  const handleSendZalo = async () => {
+    if (!resultPkg) return;
+    try {
+      await navigator.clipboard.writeText(resultPkg.zaloMessage);
+      setCopiedZalo(true);
+      setTimeout(() => setCopiedZalo(false), 3000);
+
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+      if (isMobile) {
+        // Try opening native Zalo app
+        window.location.href = 'zalo://';
+      }
+    } catch (e) {
+      console.warn("Copy to clipboard failed", e);
+    }
+  };
+
+  const handleCopyResultText = async () => {
+    if (!resultPkg) return;
+    try {
+      await navigator.clipboard.writeText(resultPkg.zaloMessage);
+      setCopiedZalo(true);
+      setTimeout(() => setCopiedZalo(false), 3000);
+    } catch (e) {
+      console.warn("Copy to clipboard failed", e);
+    }
+  };
+
+  const handleDownloadScoreCard = () => {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 600;
+      canvas.height = 750;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      // Background
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Header Gradient
+      const grad = ctx.createLinearGradient(0, 0, 600, 180);
+      grad.addColorStop(0, '#1e40af');
+      grad.addColorStop(1, '#4338ca');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 600, 180);
+
+      // Header Text
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 26px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('PHIẾU KẾT QUẢ BÀI LÀM', 300, 55);
+
+      ctx.font = '16px sans-serif';
+      ctx.fillStyle = '#bfdbfe';
+      ctx.fillText('Hệ thống Trắc nghiệm Thông minh AI QUIZ', 300, 85);
+
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillStyle = '#fde047';
+      ctx.fillText(title.substring(0, 42), 300, 135);
+
+      // Student info box
+      ctx.fillStyle = '#f8fafc';
+      ctx.strokeStyle = '#e2e8f0';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(40, 210, 520, 130, 16);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#64748b';
+      ctx.font = '15px sans-serif';
+      ctx.fillText('Họ và tên:', 65, 250);
+      ctx.fillText('Lớp học:', 65, 285);
+      ctx.fillText('Thời gian nộp:', 65, 320);
+
+      ctx.fillStyle = '#0f172a';
+      ctx.font = 'bold 17px sans-serif';
+      ctx.fillText(studentName || 'Học sinh', 180, 250);
+      ctx.fillText(studentClass || 'Tự do', 180, 285);
+      ctx.font = '15px sans-serif';
+      ctx.fillText(new Date().toLocaleString('vi-VN'), 180, 320);
+
+      // Score big display
+      ctx.fillStyle = '#ecfdf5';
+      ctx.strokeStyle = '#a7f3d0';
+      ctx.beginPath();
+      ctx.roundRect(40, 360, 520, 220, 20);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#059669';
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillText('ĐIỂM SỐ ĐẠT ĐƯỢC', 300, 400);
+
+      ctx.fillStyle = '#2563eb';
+      ctx.font = 'bold 72px sans-serif';
+      ctx.fillText(String(score10), 300, 480);
+
+      ctx.fillStyle = '#475569';
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillText(`Số câu đúng: ${correctCount} / ${totalCount} câu  •  Thời gian: ${formatTime(elapsedSeconds)}`, 300, 530);
+
+      // Footer
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '13px sans-serif';
+      ctx.fillText(`Mã xác thực: ${resultPkg?.token.substring(0, 35) || 'AQSUB'}...`, 300, 680);
+      ctx.fillText('Xác nhận bởi: Phùng Thanh AI • Bảo lưu kết quả', 300, 705);
+
+      const dataUrl = canvas.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.download = `Ket-Qua-${(studentName || 'HocSinh').replace(/\s+/g, '_')}-${score10}d.png`;
+      a.href = dataUrl;
+      a.click();
+    } catch (e) {
+      console.warn("Could not generate certificate", e);
     }
   };
 
@@ -362,31 +569,38 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
 
         {/* Result Summary Card (When submitted) */}
         {isSubmitted && (
-          <div className="bg-white rounded-2xl p-6 shadow-lg border border-slate-200 animate-in fade-in slide-in-from-top-4">
+          <div className="bg-white rounded-3xl p-6 shadow-xl border border-slate-200 animate-in fade-in slide-in-from-top-4 space-y-5">
             
             {/* Automatic reporting status pill */}
-            <div className="mb-4 flex justify-center">
+            <div className="flex flex-col items-center gap-2">
               {submissionStatus === 'submitting' && (
-                <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
-                  <div className="w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-                  <span>Đang gửi kết quả về cho Giáo viên...</span>
+                <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200 shadow-xs animate-pulse">
+                  <div className="w-3.5 h-3.5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                  <span>Đang kết nối gửi kết quả về Bảng điểm của Giáo viên...</span>
                 </div>
               )}
+
               {submissionStatus === 'success' && (
-                <div className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 shadow-xs">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>Đã ghi nhận vào bảng điểm của Giáo viên (Lần {attemptCount})</span>
+                <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-300 shadow-xs">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>Đã tự động lưu vào Bảng điểm của Giáo viên ({attemptCount > 1 ? `Lần nộp ${attemptCount}` : 'Thành công'})</span>
                 </div>
               )}
+
               {submissionStatus === 'failed' && (
-                <div className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">
-                  <CheckCircle2 className="w-4 h-4 text-slate-500" />
-                  <span>Đã hoàn thành bài làm (Offline/Đã lưu cục bộ)</span>
+                <div className="p-3 bg-amber-50 rounded-2xl border border-amber-200 text-center max-w-lg w-full space-y-1">
+                  <div className="inline-flex items-center gap-1.5 text-xs font-bold text-amber-900">
+                    <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>Bài làm đã hoàn thành & lưu trên điện thoại</span>
+                  </div>
+                  <p className="text-[11px] text-amber-700 leading-relaxed">
+                    💡 Do chính sách bảo mật của Zalo/trình duyệt di động chặn kết nối tự động, em hãy bấm nút <strong>"Gửi kết quả qua Zalo"</strong> bên dưới để gửi kết quả ngay cho Thầy/Cô nhé!
+                  </p>
                 </div>
               )}
             </div>
 
-            <div className="text-center space-y-3 border-b border-slate-100 pb-6">
+            <div className="text-center space-y-3 border-b border-slate-100 pb-5">
               <div className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full font-bold text-sm border ${evalInfo.color}`}>
                 <Award className="w-4 h-4" />
                 {evalInfo.label}
@@ -394,36 +608,116 @@ const StudentQuizView: React.FC<StudentQuizViewProps> = ({
 
               {studentName && (
                 <p className="text-slate-600 text-sm font-medium">
-                  Học sinh: <span className="font-bold text-slate-800">{studentName}</span> {studentClass ? `(${studentClass})` : ''}
+                  Học sinh: <span className="font-bold text-slate-800 text-base">{studentName}</span> {studentClass ? `• Lớp ${studentClass}` : ''}
                 </p>
               )}
 
               <div className="flex justify-center items-baseline gap-1 my-2">
-                <span className="text-5xl font-extrabold text-blue-600">{score10}</span>
-                <span className="text-slate-400 font-bold text-xl">/ 10 điểm</span>
+                <span className="text-6xl font-black text-blue-600 tracking-tight">{score10}</span>
+                <span className="text-slate-400 font-bold text-2xl">/ 10</span>
               </div>
 
-              <div className="flex flex-wrap justify-center gap-6 text-sm text-slate-600 pt-2">
-                <div>
+              <div className="flex flex-wrap justify-center gap-6 text-sm text-slate-600 pt-1">
+                <div className="bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200">
                   Số câu đúng: <strong className="text-emerald-600 text-base">{correctCount} / {totalCount}</strong>
                 </div>
-                <div>
+                <div className="bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200">
                   Thời gian: <strong className="text-slate-800 text-base">{formatTime(elapsedSeconds)}</strong>
                 </div>
               </div>
             </div>
 
-            <div className="pt-4 flex flex-wrap gap-3 justify-center">
+            {/* Quick Multi-Channel Reporting Actions for Mobile Students */}
+            <div className="p-4 bg-gradient-to-br from-blue-50/70 via-indigo-50/50 to-slate-50 rounded-2xl border border-blue-200/80 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                  <Smartphone className="w-4 h-4 text-blue-600" /> Báo cáo kết quả bài làm cho Thầy/Cô:
+                </span>
+                {copiedZalo && (
+                  <span className="text-[11px] font-bold text-emerald-600 flex items-center gap-1 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200 animate-in fade-in">
+                    <Check className="w-3 h-3" /> Đã sao chép tin nhắn!
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {/* Zalo Button */}
+                <button
+                  onClick={handleSendZalo}
+                  className="flex items-center justify-center gap-2 py-3 px-4 bg-[#0068ff] hover:bg-[#0052cc] text-white rounded-xl font-bold text-xs shadow-md shadow-blue-500/20 transition-all active:scale-95"
+                >
+                  <MessageSquare className="w-4 h-4 shrink-0" />
+                  <span>Gửi kết quả qua Zalo cho Cô</span>
+                </button>
+
+                {/* Copy Text Button */}
+                <button
+                  onClick={handleCopyResultText}
+                  className="flex items-center justify-center gap-2 py-3 px-4 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl font-bold text-xs shadow-xs transition-all active:scale-95"
+                >
+                  <Copy className="w-4 h-4 text-slate-500 shrink-0" />
+                  <span>{copiedZalo ? "Đã sao chép kết quả" : "Sao chép tin nhắn kết quả"}</span>
+                </button>
+
+                {/* Download Certificate Card */}
+                <button
+                  onClick={handleDownloadScoreCard}
+                  className="flex items-center justify-center gap-2 py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold text-xs shadow-xs transition-all active:scale-95"
+                >
+                  <Download className="w-4 h-4 shrink-0" />
+                  <span>Tải ảnh Phiếu điểm (.png)</span>
+                </button>
+
+                {/* Show Result Code */}
+                <button
+                  onClick={() => setShowResultCodeModal(!showResultCodeModal)}
+                  className="flex items-center justify-center gap-2 py-2.5 px-3 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-xl font-semibold text-xs transition-all active:scale-95"
+                >
+                  <QrCode className="w-4 h-4 shrink-0" />
+                  <span>{showResultCodeModal ? "Đóng mã nộp bài" : "Xem mã xác thực bài nộp"}</span>
+                </button>
+              </div>
+
+              {/* Result Code Expandable Box */}
+              {showResultCodeModal && resultPkg && (
+                <div className="mt-3 p-3 bg-white rounded-xl border border-indigo-200 space-y-2 animate-in fade-in">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-indigo-950">Mã xác thực bài nộp của em:</span>
+                    <button
+                      onClick={async () => {
+                        await navigator.clipboard.writeText(resultPkg.token);
+                        setCopiedZalo(true);
+                        setTimeout(() => setCopiedZalo(false), 2500);
+                      }}
+                      className="text-[10px] text-blue-600 hover:underline font-semibold"
+                    >
+                      Sao chép mã này
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    readOnly
+                    value={resultPkg.token}
+                    className="w-full px-3 py-1.5 font-mono text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-700 select-all outline-none"
+                  />
+                  <p className="text-[10px] text-slate-500">
+                    💡 Em có thể gửi mã này cho Giáo viên để nhập điểm trực tiếp vào sổ điểm điện tử.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="pt-2 flex flex-wrap gap-3 justify-center">
               <button
                 onClick={handleRetake}
-                className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition-all shadow-md active:scale-95 text-sm"
+                className="flex items-center gap-2 px-5 py-2.5 bg-slate-900 text-white rounded-xl font-bold hover:bg-slate-800 transition-all shadow-md active:scale-95 text-xs"
               >
-                <RotateCcw className="w-4 h-4" /> Làm lại bài
+                <RotateCcw className="w-4 h-4" /> Làm lại bài ôn tập
               </button>
               {onExitStudentMode && !isSharedLink && (
                 <button
                   onClick={onExitStudentMode}
-                  className="flex items-center gap-2 px-5 py-2.5 bg-slate-100 text-slate-700 rounded-xl font-bold hover:bg-slate-200 transition-all text-sm"
+                  className="flex items-center gap-2 px-5 py-2.5 bg-slate-100 text-slate-700 rounded-xl font-bold hover:bg-slate-200 transition-all text-xs"
                 >
                   <ArrowLeft className="w-4 h-4" /> Quay lại tạo câu hỏi
                 </button>

@@ -89,12 +89,40 @@ const App: React.FC = () => {
       try {
         const teacherEmail = getTeacherEmail();
         const teacherId = getTeacherId(undefined, teacherEmail);
-        const res = await fetch(`/api/teacher-submissions?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(teacherEmail)}`);
-        let totalCount = 0;
-        if (res.ok) {
-          const data = await res.json();
-          totalCount = (data.submissions || []).length;
-        }
+
+        let serverList: any[] = [];
+        try {
+          const res = await fetch(`/api/teacher-submissions?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(teacherEmail)}`);
+          if (res.ok) {
+            const data = await res.json();
+            serverList = data.submissions || [];
+          }
+        } catch (e) {}
+
+        // Check counterpart origin in background
+        try {
+          let altOrigin = '';
+          if (window.location.origin.includes('ais-dev-')) {
+            altOrigin = window.location.origin.replace('ais-dev-', 'ais-pre-');
+          } else if (window.location.origin.includes('ais-pre-')) {
+            altOrigin = window.location.origin.replace('ais-pre-', 'ais-dev-');
+          }
+          if (altOrigin) {
+            const altRes = await fetch(`${altOrigin}/api/teacher-submissions?teacherId=${encodeURIComponent(teacherId)}&teacherEmail=${encodeURIComponent(teacherEmail)}`, {
+              credentials: 'include'
+            });
+            if (altRes.ok) {
+              const altData = await altRes.json();
+              const altList: any[] = altData.submissions || [];
+              altList.forEach(item => {
+                const exists = serverList.some(s => s.id === item.id || (s.studentName === item.studentName && s.quizTitle === item.quizTitle));
+                if (!exists) serverList.push(item);
+              });
+            }
+          }
+        } catch (altErr) {}
+
+        let totalCount = serverList.length;
         try {
           const localSubsRaw = localStorage.getItem('teacher_local_submissions');
           if (localSubsRaw) {
@@ -118,7 +146,7 @@ const App: React.FC = () => {
     };
 
     checkSubmissions();
-    const interval = setInterval(checkSubmissions, 15000);
+    const interval = setInterval(checkSubmissions, 10000);
 
     return () => {
       window.removeEventListener('hashchange', handleHashChange);

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { StudentSubmission, ClassRoster } from '../types';
-import { getTeacherId, getTeacherEmail, setTeacherEmail } from '../utils/shareUtils';
+import { getTeacherId, getTeacherEmail, setTeacherEmail, parseStudentResultCode } from '../utils/shareUtils';
 import MathRenderer from './MathRenderer';
 import { 
   Users, 
@@ -102,9 +102,14 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
   const [rawStudentNamesText, setRawStudentNamesText] = useState('');
   const [isSavingRoster, setIsSavingRoster] = useState(false);
 
+  // Direct Zalo / Code Import Modal
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [importInputText, setImportInputText] = useState('');
+  const [isImporting, setIsImporting] = useState(false);
+
   const teacherId = useMemo(() => getTeacherId(undefined, currentTeacherEmail), [currentTeacherEmail]);
 
-  // Fetch Submissions strictly (with local & server fallback)
+  // Fetch Submissions strictly (with multi-origin and server fallback)
   const fetchSubmissions = async (emailToUse?: string, isBackground = false) => {
     const validEmail = (typeof emailToUse === 'string' && emailToUse.trim()) ? emailToUse.trim().toLowerCase() : undefined;
     const targetEmail = (validEmail || currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
@@ -123,6 +128,34 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
         const data = await res.json();
         serverSubs = data.submissions || [];
       }
+
+      // Check counterpart origin (ais-dev <-> ais-pre) in parallel
+      try {
+        let altOrigin = '';
+        if (window.location.origin.includes('ais-dev-')) {
+          altOrigin = window.location.origin.replace('ais-dev-', 'ais-pre-');
+        } else if (window.location.origin.includes('ais-pre-')) {
+          altOrigin = window.location.origin.replace('ais-pre-', 'ais-dev-');
+        }
+        if (altOrigin) {
+          const altRes = await fetch(`${altOrigin}/api/teacher-submissions?teacherId=${encodeURIComponent(targetId)}&teacherEmail=${encodeURIComponent(targetEmail)}`, {
+            credentials: 'include'
+          });
+          const altType = altRes.headers.get('content-type') || '';
+          if (altRes.ok && altType.includes('application/json')) {
+            const altData = await altRes.json();
+            const altSubs: StudentSubmission[] = altData.submissions || [];
+            altSubs.forEach(altItem => {
+              const exists = serverSubs.some(s => s.id === altItem.id || (s.studentName.toLowerCase().trim() === altItem.studentName.toLowerCase().trim() && s.quizTitle === altItem.quizTitle));
+              if (!exists) {
+                serverSubs.push(altItem);
+              }
+            });
+          }
+        }
+      } catch (altErr) {
+        // silent fallback if counterpart is unreachable
+      }
       
       // Merge with any locally recorded submissions
       let combined = [...serverSubs];
@@ -136,7 +169,7 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
                 s.id === loc.id || 
                 (s.studentName.toLowerCase() === loc.studentName.toLowerCase() && 
                  s.quizTitle === loc.quizTitle && 
-                 Math.abs(s.submittedAt - loc.submittedAt) < 5000)
+                 Math.abs(s.submittedAt - loc.submittedAt) < 15000)
               );
               if (!exists) {
                 combined.push(loc);
@@ -146,6 +179,17 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
         }
       } catch (e) {
         // ignore parse error
+      }
+
+      // Automatically sync combined to server so server holds all records permanently
+      if (combined.length > 0) {
+        try {
+          fetch('/api/bulk-sync-submissions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: combined })
+          }).catch(() => {});
+        } catch (syncErr) {}
       }
 
       // Sort newest first
@@ -690,6 +734,107 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
     }
   };
 
+  // Handle Import Result from Zalo or Code
+  const handleProcessImport = async () => {
+    if (!importInputText.trim()) return;
+    setIsImporting(true);
+    try {
+      const email = (currentTeacherEmail || getTeacherEmail()).trim().toLowerCase();
+      const tId = getTeacherId(undefined, email);
+
+      const lines = importInputText.split(/\n\s*\n|\r\n\r\n/);
+      let count = 0;
+      const newItems: StudentSubmission[] = [];
+
+      for (const block of lines) {
+        const parsed = parseStudentResultCode(block.trim());
+        if (parsed) {
+          const subItem: StudentSubmission = {
+            id: parsed.id || `sub_import_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            teacherId: parsed.teacherId || tId,
+            teacherEmail: parsed.teacherEmail || email,
+            quizTitle: parsed.quizTitle || 'Bài tập ôn tập',
+            subject: parsed.subject || '',
+            grade: parsed.grade || '',
+            studentName: parsed.studentName,
+            studentClass: parsed.studentClass || '',
+            score: parsed.score,
+            correctCount: parsed.correctCount,
+            totalCount: parsed.totalCount,
+            timeSpentSeconds: parsed.timeSpentSeconds,
+            submittedAt: parsed.submittedAt || Date.now(),
+            attemptNumber: 1
+          };
+          newItems.push(subItem);
+          count++;
+        }
+      }
+
+      if (count === 0) {
+        // Try single text parse
+        const singleParsed = parseStudentResultCode(importInputText);
+        if (singleParsed) {
+          const subItem: StudentSubmission = {
+            id: singleParsed.id || `sub_import_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            teacherId: singleParsed.teacherId || tId,
+            teacherEmail: singleParsed.teacherEmail || email,
+            quizTitle: singleParsed.quizTitle || 'Bài tập ôn tập',
+            subject: singleParsed.subject || '',
+            grade: singleParsed.grade || '',
+            studentName: singleParsed.studentName,
+            studentClass: singleParsed.studentClass || '',
+            score: singleParsed.score,
+            correctCount: singleParsed.correctCount,
+            totalCount: singleParsed.totalCount,
+            timeSpentSeconds: singleParsed.timeSpentSeconds,
+            submittedAt: singleParsed.submittedAt || Date.now(),
+            attemptNumber: 1
+          };
+          newItems.push(subItem);
+          count++;
+        }
+      }
+
+      if (count > 0) {
+        // Merge into local storage
+        const localSubsRaw = localStorage.getItem('teacher_local_submissions');
+        let localList = localSubsRaw ? JSON.parse(localSubsRaw) : [];
+        if (!Array.isArray(localList)) localList = [];
+        newItems.forEach(item => {
+          localList.unshift(item);
+        });
+        localStorage.setItem('teacher_local_submissions', JSON.stringify(localList.slice(0, 300)));
+
+        // Merge into state
+        setSubmissions(prev => {
+          const merged = [...newItems, ...prev];
+          merged.sort((a, b) => b.submittedAt - a.submittedAt);
+          return merged;
+        });
+
+        // Sync to server
+        fetch('/api/bulk-sync-submissions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: newItems })
+        }).catch(() => {});
+
+        setRefreshToast(`Đã nhập thành công ${count} kết quả bài làm!`);
+        setTimeout(() => setRefreshToast(null), 3000);
+        setIsImportModalOpen(false);
+        setImportInputText('');
+      } else {
+        setRefreshToast('Không nhận diện được tin nhắn kết quả. Vui lòng kiểm tra lại!');
+        setTimeout(() => setRefreshToast(null), 3500);
+      }
+    } catch (e: any) {
+      setRefreshToast('Lỗi khi nhập bài: ' + (e.message || 'Lỗi không xác định'));
+      setTimeout(() => setRefreshToast(null), 3500);
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
   // Handle Teacher Email Update (Switch account)
   const handleSaveTeacherEmail = async () => {
     const clean = emailInput.trim().toLowerCase();
@@ -963,6 +1108,14 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
             >
               <AlertCircle className="w-4 h-4 text-blue-600" />
               <span>{showGuide ? 'Đóng hướng dẫn' : '💡 Cách đồng bộ'}</span>
+            </button>
+            <button
+              onClick={() => setIsImportModalOpen(true)}
+              className="px-3 py-2 rounded-xl text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition-all flex items-center gap-1.5 active:scale-95 shadow-xs"
+              title="Nhập kết quả từ tin nhắn Zalo hoặc mã xác thực của học sinh"
+            >
+              <MessageSquare className="w-3.5 h-3.5 text-indigo-600" />
+              <span>📥 Nhập từ Zalo</span>
             </button>
             <button
               onClick={handleManualRefresh}
@@ -2089,6 +2242,70 @@ const StudentSubmissionsModal: React.FC<StudentSubmissionsModalProps> = ({
                   className="flex-1 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs shadow-md"
                 >
                   Xóa tất cả
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Import from Zalo / Result Code Modal */}
+        {isImportModalOpen && (
+          <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 z-70 animate-in fade-in">
+            <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-9 h-9 rounded-xl bg-[#0068ff] text-white flex items-center justify-center font-bold">
+                    <MessageSquare className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">Nhập Bài Nộp Từ Zalo / Mã Kết Quả</h3>
+                    <p className="text-xs text-slate-500">Dán tin nhắn Zalo hoặc mã xác thực học sinh gửi</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setIsImportModalOpen(false);
+                    setImportInputText('');
+                  }}
+                  className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
+                  <span>Nội dung tin nhắn / Mã AQSUB:</span>
+                  <span className="text-[11px] text-slate-400 font-normal">Hỗ trợ dán 1 hoặc nhiều tin nhắn</span>
+                </label>
+                <textarea
+                  rows={5}
+                  value={importInputText}
+                  onChange={(e) => setImportInputText(e.target.value)}
+                  placeholder={`Ví dụ tin nhắn học sinh gửi qua Zalo:\n[AI QUIZ - BÁO CÁO KẾT QUẢ BÀI LÀM]\n👤 Học sinh: Nguyễn Văn A\n🏫 Lớp: 12A1\n🎯 Điểm số: 9/10\n🔑 Mã xác thực: AQSUB:...`}
+                  className="w-full p-3 font-mono text-xs border border-slate-300 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 bg-slate-50/50"
+                />
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  💡 Bạn chỉ cần sao chép tin nhắn học sinh nhắn trên nhóm Zalo hoặc tin nhắn riêng rồi dán vào đây, hệ thống sẽ tự động bóc tách tên, lớp, điểm số và đưa vào sổ điểm.
+                </p>
+              </div>
+
+              <div className="flex gap-2.5 pt-2">
+                <button
+                  onClick={() => {
+                    setIsImportModalOpen(false);
+                    setImportInputText('');
+                  }}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold text-xs"
+                >
+                  Đóng
+                </button>
+                <button
+                  onClick={handleProcessImport}
+                  disabled={isImporting || !importInputText.trim()}
+                  className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-md shadow-blue-500/20 disabled:opacity-50"
+                >
+                  {isImporting ? 'Đang phân tích...' : 'Xác nhận nhập điểm'}
                 </button>
               </div>
             </div>
